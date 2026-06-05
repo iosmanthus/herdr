@@ -8,12 +8,26 @@
   zstd,
   pkg-config,
   git,
+  makeDesktopItem,
   cctools ? null,
   xcbuild ? null,
 }:
 
 let
   manifest = lib.importTOML ../Cargo.toml;
+  desktopItem = makeDesktopItem {
+    name = "herdr";
+    desktopName = "herdr";
+    genericName = "Terminal workspace manager";
+    comment = "Agent multiplexer that lives in your terminal";
+    exec = "herdr";
+    icon = "herdr";
+    terminal = true;
+    categories = [
+      "Utility"
+      "Development"
+    ];
+  };
   zigDeps = callPackage ../vendor/libghostty-vt/build.zig.zon.nix {
     name = "herdr-libghostty-vt-zig-cache";
     inherit zstd;
@@ -71,6 +85,15 @@ rustPlatform.buildRustPackage {
   preBuild = ''
     export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
     export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local-cache"
+  '';
+
+  # Install a themed icon + desktop entry so desktop notifications
+  # (notify-send --icon herdr --hint string:desktop-entry:herdr) resolve.
+  postInstall = lib.optionalString stdenv.hostPlatform.isLinux ''
+    install -Dm644 assets/logo.svg $out/share/icons/hicolor/scalable/apps/herdr.svg
+    install -Dm644 assets/logo.png $out/share/icons/hicolor/512x512/apps/herdr.png
+    install -Dm644 ${desktopItem}/share/applications/herdr.desktop \
+      $out/share/applications/herdr.desktop
   '';
 
   # Rust tests are covered by the normal CI workflow. The Nix check is
