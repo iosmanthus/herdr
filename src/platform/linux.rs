@@ -240,11 +240,33 @@ fn show_desktop_notification_with_command(
     }
 
     let mut cmd = command("notify-send");
+    cmd.arg("--app-name").arg("herdr");
+    if let Some(icon) = herdr_icon_path() {
+        cmd.arg("--icon").arg(icon);
+    }
     cmd.arg("--").arg(title);
     if let Some(body) = body.filter(|body| !body.is_empty()) {
         cmd.arg(body);
     }
     run_notification_command(cmd)
+}
+
+/// Materialize herdr's bundled icon into the cache dir so desktop notifications
+/// can reference it by path (and be attributed to herdr). Returns `None` if it
+/// cannot be written.
+fn herdr_icon_path() -> Option<PathBuf> {
+    const ICON_PNG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/logo.png"));
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    let dir = base.join("herdr");
+    let path = dir.join("herdr.png");
+    if !path.exists() {
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::write(&path, ICON_PNG).ok()?;
+    }
+    Some(path)
 }
 
 fn run_notification_command(mut command: Command) -> std::io::Result<bool> {
@@ -430,11 +452,14 @@ mod tests {
     }
 
     #[test]
-    fn desktop_notification_separates_option_like_titles() {
+    fn desktop_notification_sets_app_name_icon_and_separates_titles() {
         let _guard = env_lock().lock().unwrap();
+        let cache =
+            std::env::temp_dir().join(format!("herdr-cache-{}", std::process::id()));
         unsafe {
             std::env::remove_var("WAYLAND_DISPLAY");
             std::env::set_var("DISPLAY", ":0");
+            std::env::set_var("XDG_CACHE_HOME", &cache);
         }
 
         let path =
@@ -453,6 +478,19 @@ mod tests {
         assert!(shown);
         let args = std::fs::read_to_string(&path).expect("args file");
         let _ = std::fs::remove_file(&path);
-        assert_eq!(args, "--\n-danger\nbody\n");
+        let _ = std::fs::remove_dir_all(&cache);
+        unsafe {
+            std::env::remove_var("XDG_CACHE_HOME");
+        }
+
+        assert!(
+            args.contains("--app-name\nherdr\n"),
+            "expected --app-name herdr, got: {args:?}"
+        );
+        assert!(args.contains("--icon\n"), "expected --icon, got: {args:?}");
+        assert!(
+            args.ends_with("--\n-danger\nbody\n"),
+            "expected -- before title/body, got: {args:?}"
+        );
     }
 }
