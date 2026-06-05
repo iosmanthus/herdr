@@ -101,15 +101,26 @@ impl TileLayout {
 
     /// Compute rects for all panes given the available area.
     pub fn panes(&self, area: Rect) -> Vec<PaneInfo> {
+        self.panes_with_gap(area, 0)
+    }
+
+    /// Compute pane rects, leaving `gap` blank cells between adjacent panes.
+    /// `gap == 0` produces touching rects (identical to [`panes`]).
+    pub fn panes_with_gap(&self, area: Rect, gap: u16) -> Vec<PaneInfo> {
         let mut result = Vec::new();
-        collect_panes(&self.root, area, self.focus, &mut result);
+        collect_panes(&self.root, area, self.focus, gap, &mut result);
         result
     }
 
     /// Collect all split boundaries for mouse drag resize.
     pub fn splits(&self, area: Rect) -> Vec<SplitBorder> {
+        self.splits_with_gap(area, 0)
+    }
+
+    /// Collect split boundaries accounting for the inter-pane `gap`.
+    pub fn splits_with_gap(&self, area: Rect, gap: u16) -> Vec<SplitBorder> {
         let mut result = Vec::new();
-        collect_splits(&self.root, area, vec![], &mut result);
+        collect_splits(&self.root, area, vec![], gap, &mut result);
         result
     }
 
@@ -160,13 +171,13 @@ impl TileLayout {
 
     /// Adjust the nearest split in the given direction for the focused pane.
     /// `delta` is positive to grow, negative to shrink.
-    pub fn resize_focused(&mut self, nav: NavDirection, delta: f32, area: Rect) {
-        let panes = self.panes(area);
+    pub fn resize_focused(&mut self, nav: NavDirection, delta: f32, area: Rect, gap: u16) {
+        let panes = self.panes_with_gap(area, gap);
         let Some(focused) = panes.iter().find(|p| p.is_focused) else {
             return;
         };
         let focused_rect = focused.rect;
-        let splits = self.splits(area);
+        let splits = self.splits_with_gap(area, gap);
 
         // Find the split whose border is adjacent to the focused pane in the given direction
         let target_dir = match nav {
@@ -296,7 +307,7 @@ fn count_panes(node: &Node) -> usize {
     }
 }
 
-fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneInfo>) {
+fn collect_panes(node: &Node, area: Rect, focus: PaneId, gap: u16, result: &mut Vec<PaneInfo>) {
     match node {
         Node::Pane(id) => {
             result.push(PaneInfo {
@@ -314,14 +325,14 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
             first,
             second,
         } => {
-            let (a, b) = split_rect(area, *direction, *ratio);
-            collect_panes(first, a, focus, result);
-            collect_panes(second, b, focus, result);
+            let (a, b) = split_rect(area, *direction, *ratio, gap);
+            collect_panes(first, a, focus, gap, result);
+            collect_panes(second, b, focus, gap, result);
         }
     }
 }
 
-fn collect_splits(node: &Node, area: Rect, path: Vec<bool>, result: &mut Vec<SplitBorder>) {
+fn collect_splits(node: &Node, area: Rect, path: Vec<bool>, gap: u16, result: &mut Vec<SplitBorder>) {
     if let Node::Split {
         direction,
         ratio,
@@ -329,7 +340,7 @@ fn collect_splits(node: &Node, area: Rect, path: Vec<bool>, result: &mut Vec<Spl
         second,
     } = node
     {
-        let (a, b) = split_rect(area, *direction, *ratio);
+        let (a, b) = split_rect(area, *direction, *ratio, gap);
         let pos = match direction {
             Direction::Horizontal => a.x + a.width,
             Direction::Vertical => a.y + a.height,
@@ -342,10 +353,10 @@ fn collect_splits(node: &Node, area: Rect, path: Vec<bool>, result: &mut Vec<Spl
         });
         let mut lp = path.clone();
         lp.push(false);
-        collect_splits(first, a, lp, result);
+        collect_splits(first, a, lp, gap, result);
         let mut rp = path;
         rp.push(true);
-        collect_splits(second, b, rp, result);
+        collect_splits(second, b, rp, gap, result);
     }
 }
 
@@ -443,23 +454,59 @@ fn get_ratio_at(node: &Node, path: &[bool]) -> Option<f32> {
     }
 }
 
-fn split_rect(area: Rect, direction: Direction, ratio: f32) -> (Rect, Rect) {
+/// Split `area` into two child rects. `gap` blank cells are left between them;
+/// `gap == 0` yields touching rects (the historical behaviour).
+fn split_rect(area: Rect, direction: Direction, ratio: f32, gap: u16) -> (Rect, Rect) {
     match direction {
         Direction::Horizontal => {
             let first_w = ((area.width as f32) * ratio).round() as u16;
-            let second_w = area.width.saturating_sub(first_w);
+            let second_x = area.x.saturating_add(first_w).saturating_add(gap);
+            let second_w = area.width.saturating_sub(first_w).saturating_sub(gap);
             (
                 Rect::new(area.x, area.y, first_w, area.height),
-                Rect::new(area.x + first_w, area.y, second_w, area.height),
+                Rect::new(second_x, area.y, second_w, area.height),
             )
         }
         Direction::Vertical => {
             let first_h = ((area.height as f32) * ratio).round() as u16;
-            let second_h = area.height.saturating_sub(first_h);
+            let second_y = area.y.saturating_add(first_h).saturating_add(gap);
+            let second_h = area.height.saturating_sub(first_h).saturating_sub(gap);
             (
                 Rect::new(area.x, area.y, area.width, first_h),
-                Rect::new(area.x, area.y + first_h, area.width, second_h),
+                Rect::new(area.x, second_y, area.width, second_h),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod gap_tests {
+    use super::*;
+
+    #[test]
+    fn split_rect_gap_zero_is_touching() {
+        let area = Rect::new(0, 0, 100, 30);
+        let (a, b) = split_rect(area, Direction::Horizontal, 0.5, 0);
+        assert_eq!(a, Rect::new(0, 0, 50, 30));
+        assert_eq!(b, Rect::new(50, 0, 50, 30));
+        assert_eq!(a.x + a.width, b.x, "panes touch when gap == 0");
+    }
+
+    #[test]
+    fn split_rect_horizontal_gap_separates_panes() {
+        let area = Rect::new(0, 0, 100, 30);
+        let (a, b) = split_rect(area, Direction::Horizontal, 0.5, 2);
+        assert_eq!(a, Rect::new(0, 0, 50, 30));
+        assert_eq!(b, Rect::new(52, 0, 48, 30));
+        assert_eq!(b.x - (a.x + a.width), 2, "two blank cells between panes");
+    }
+
+    #[test]
+    fn split_rect_vertical_gap_separates_panes() {
+        let area = Rect::new(0, 0, 80, 24);
+        let (a, b) = split_rect(area, Direction::Vertical, 0.5, 1);
+        assert_eq!(a, Rect::new(0, 0, 80, 12));
+        assert_eq!(b, Rect::new(0, 13, 80, 11));
+        assert_eq!(b.y - (a.y + a.height), 1, "one blank row between panes");
     }
 }

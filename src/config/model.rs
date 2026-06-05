@@ -369,6 +369,10 @@ pub struct UiConfig {
     pub sidebar_max_width: u16,
     /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
     pub mobile_width_threshold: u16,
+    /// Blank cells between adjacent panes. `0` renders a shared single-line
+    /// divider between panes (tmux-style); higher values insert that many empty
+    /// cells and give each pane its own border. Default: 0.
+    pub pane_gap: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
     /// Modifier that lets right-click gestures pass through to pane apps. Empty disables it.
@@ -557,6 +561,7 @@ impl Default for UiConfig {
             sidebar_min_width: 18,
             sidebar_max_width: 36,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
+            pane_gap: 0,
             mouse_capture: true,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
@@ -720,6 +725,19 @@ show_agent_labels_on_pane_borders = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.ui.show_agent_labels_on_pane_borders);
+    }
+
+    #[test]
+    fn pane_gap_defaults_to_zero_and_parses() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.pane_gap, 0);
+
+        let toml = r#"
+[ui]
+pane_gap = 2
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.pane_gap, 2);
     }
 
     #[test]

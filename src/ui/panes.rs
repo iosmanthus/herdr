@@ -63,6 +63,177 @@ fn pane_inner_rect(area: Rect, framed: bool) -> Rect {
     }
 }
 
+fn x_ranges_overlap(a: Rect, b: Rect) -> bool {
+    a.x < b.x.saturating_add(b.width) && b.x < a.x.saturating_add(a.width)
+}
+
+fn y_ranges_overlap(a: Rect, b: Rect) -> bool {
+    a.y < b.y.saturating_add(b.height) && b.y < a.y.saturating_add(a.height)
+}
+
+/// True if another pane sits flush against the left edge of `rect`.
+fn has_left_neighbor(rect: Rect, rects: &[Rect]) -> bool {
+    rects
+        .iter()
+        .any(|o| o.x.saturating_add(o.width) == rect.x && y_ranges_overlap(*o, rect))
+}
+
+/// True if another pane sits flush against the top edge of `rect`.
+fn has_top_neighbor(rect: Rect, rects: &[Rect]) -> bool {
+    rects
+        .iter()
+        .any(|o| o.y.saturating_add(o.height) == rect.y && x_ranges_overlap(*o, rect))
+}
+
+/// Content rect for a pane drawn with shared single-line dividers (`pane_gap == 0`).
+/// Left/top edges are only inset when the pane is on the outer boundary, because an
+/// internal divider is owned (drawn) by the pane above/left of it, freeing this pane's
+/// first row/column for content.
+fn single_line_inner_rect(rect: Rect, rects: &[Rect]) -> Rect {
+    let left_inset = if has_left_neighbor(rect, rects) { 0 } else { 1 };
+    let top_inset = if has_top_neighbor(rect, rects) { 0 } else { 1 };
+    Rect::new(
+        rect.x.saturating_add(left_inset),
+        rect.y.saturating_add(top_inset),
+        rect.width.saturating_sub(left_inset + 1),
+        rect.height.saturating_sub(top_inset + 1),
+    )
+}
+
+/// Box-drawing glyph for the given up/down/left/right line connectivity.
+fn box_glyph(up: bool, down: bool, left: bool, right: bool) -> &'static str {
+    match (up, down, left, right) {
+        (false, false, false, false) => " ",
+        (false, false, false, true) | (false, false, true, false) | (false, false, true, true) => {
+            "─"
+        }
+        (false, true, false, false) | (true, false, false, false) | (true, true, false, false) => {
+            "│"
+        }
+        (false, true, false, true) => "┌",
+        (false, true, true, false) => "┐",
+        (true, false, false, true) => "└",
+        (true, false, true, false) => "┘",
+        (false, true, true, true) => "┬",
+        (true, false, true, true) => "┴",
+        (true, true, false, true) => "├",
+        (true, true, true, false) => "┤",
+        (true, true, true, true) => "┼",
+    }
+}
+
+/// Draw shared single-line dividers (and pane labels) between tiled panes when
+/// `pane_gap == 0`. Each internal boundary is drawn exactly once and box-drawing
+/// junctions are resolved from line connectivity so they merge like tmux's.
+fn render_pane_dividers(
+    app: &AppState,
+    frame: &mut Frame,
+    pane_infos: &[PaneInfo],
+    ws: &crate::workspace::Workspace,
+) {
+    use std::collections::HashSet;
+
+    let rects: Vec<Rect> = pane_infos.iter().map(|p| p.rect).collect();
+    let mut vertical: HashSet<(u16, u16)> = HashSet::new();
+    let mut horizontal: HashSet<(u16, u16)> = HashSet::new();
+    let mut accent: HashSet<(u16, u16)> = HashSet::new();
+
+    for info in pane_infos {
+        let r = info.rect;
+        if r.width == 0 || r.height == 0 {
+            continue;
+        }
+        let left = r.x;
+        let right = r.x + r.width - 1;
+        let top = r.y;
+        let bottom = r.y + r.height - 1;
+        let draw_left = !has_left_neighbor(r, &rects);
+        let draw_top = !has_top_neighbor(r, &rects);
+
+        for y in top..=bottom {
+            vertical.insert((right, y));
+            if draw_left {
+                vertical.insert((left, y));
+            }
+            if info.is_focused {
+                accent.insert((right, y));
+                if draw_left {
+                    accent.insert((left, y));
+                }
+            }
+        }
+        for x in left..=right {
+            horizontal.insert((x, bottom));
+            if draw_top {
+                horizontal.insert((x, top));
+            }
+            if info.is_focused {
+                accent.insert((x, bottom));
+                if draw_top {
+                    accent.insert((x, top));
+                }
+            }
+        }
+    }
+
+    let cells: Vec<(u16, u16)> = vertical.union(&horizontal).copied().collect();
+    let buf = frame.buffer_mut();
+    for (x, y) in cells {
+        let up = vertical.contains(&(x, y.wrapping_sub(1)));
+        let down = vertical.contains(&(x, y.saturating_add(1)));
+        let left = horizontal.contains(&(x.wrapping_sub(1), y));
+        let right = horizontal.contains(&(x.saturating_add(1), y));
+        let glyph = box_glyph(up, down, left, right);
+        let color = if accent.contains(&(x, y)) {
+            app.palette.accent
+        } else {
+            app.palette.overlay0
+        };
+        let cell = &mut buf[(x, y)];
+        cell.set_symbol(glyph);
+        cell.set_fg(color);
+    }
+
+    // Pane labels sit on the (possibly shared) top border line.
+    for info in pane_infos {
+        let r = info.rect;
+        if r.width <= 4 {
+            continue;
+        }
+        let Some(title) = ws
+            .pane_state(info.id)
+            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
+            .and_then(|label| pane_border_title(&label, r.width))
+        else {
+            continue;
+        };
+        let row = if has_top_neighbor(r, &rects) {
+            r.y.saturating_sub(1)
+        } else {
+            r.y
+        };
+        let color = if info.is_focused {
+            app.palette.accent
+        } else {
+            app.palette.overlay0
+        };
+        let max_x = r.x + r.width - 1;
+        let mut cx = r.x.saturating_add(2);
+        let mut tmp = [0u8; 4];
+        for ch in title.chars() {
+            if cx >= max_x {
+                break;
+            }
+            let s = ch.encode_utf8(&mut tmp);
+            let cell = &mut buf[(cx, row)];
+            cell.set_symbol(s);
+            cell.set_fg(color);
+            cx = cx.saturating_add(1);
+        }
+    }
+}
+
 fn runtime_for_tab_pane<'a>(
     terminal_runtimes: &'a TerminalRuntimeRegistry,
     tab: &'a crate::workspace::Tab,
@@ -124,9 +295,15 @@ pub(super) fn resize_tab_panes(
         return;
     }
 
-    for info in tab.layout.panes(area) {
+    let panes = tab.layout.panes_with_gap(area, app.pane_gap);
+    let pane_rects: Vec<Rect> = panes.iter().map(|p| p.rect).collect();
+    for info in &panes {
         let pane_inner = if multi_pane {
-            Block::default().borders(Borders::ALL).inner(info.rect)
+            if app.pane_gap == 0 {
+                single_line_inner_rect(info.rect, &pane_rects)
+            } else {
+                Block::default().borders(Borders::ALL).inner(info.rect)
+            }
         } else {
             area
         };
@@ -161,7 +338,6 @@ pub(super) fn compute_pane_infos(
     };
 
     let multi_pane = ws.layout.pane_count() > 1;
-    let terminal_active = app.mode == Mode::Terminal;
 
     if ws.zoomed {
         let focused_id = ws.layout.focused();
@@ -192,19 +368,16 @@ pub(super) fn compute_pane_infos(
         }];
     }
 
-    let mut pane_infos = ws.layout.panes(area);
+    let mut pane_infos = ws.layout.panes_with_gap(area, app.pane_gap);
+    let pane_rects: Vec<Rect> = pane_infos.iter().map(|p| p.rect).collect();
 
     for info in &mut pane_infos {
         let pane_inner = if multi_pane {
-            let border_set = if info.is_focused && terminal_active {
-                ratatui::symbols::border::THICK
+            if app.pane_gap == 0 {
+                single_line_inner_rect(info.rect, &pane_rects)
             } else {
-                ratatui::symbols::border::PLAIN
-            };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_set(border_set);
-            block.inner(info.rect)
+                Block::default().borders(Borders::ALL).inner(info.rect)
+            }
         } else {
             area
         };
@@ -254,7 +427,7 @@ pub(super) fn render_panes(
 
     for info in &app.view.pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
-            if multi_pane {
+            if multi_pane && app.pane_gap > 0 {
                 let (border_style, border_set) = if info.is_focused && terminal_active {
                     (
                         Style::default().fg(app.palette.accent),
@@ -316,6 +489,10 @@ pub(super) fn render_panes(
             );
             render_copy_mode_cursor(app, frame, info);
         }
+    }
+
+    if multi_pane && app.pane_gap == 0 {
+        render_pane_dividers(app, frame, &app.view.pane_infos, ws);
     }
 }
 

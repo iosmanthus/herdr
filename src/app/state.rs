@@ -1286,6 +1286,8 @@ pub struct AppState {
     pub confirm_close: bool,
     pub prompt_new_tab_name: bool,
     pub show_agent_labels_on_pane_borders: bool,
+    /// Blank cells between adjacent panes; 0 = shared single-line divider.
+    pub pane_gap: u16,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
@@ -1607,6 +1609,7 @@ impl AppState {
             confirm_close: true,
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
+            pane_gap: 0,
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,
