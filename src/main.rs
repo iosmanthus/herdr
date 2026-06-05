@@ -213,9 +213,14 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Pane scrollback lines to scroll per mouse wheel notch.
 # mouse_scroll_lines = 3
 
-# Blank cells between adjacent split panes.
-# 0 draws a shared single-line divider between panes (tmux-style).
-# Higher values insert that many empty cells and give each pane its own border.
+# How borders between panes are drawn:
+#   "per_pane" = each pane draws its own border (default; two adjacent lines
+#                between panes unless separated by pane_gap)
+#   "shared"   = adjacent panes share one tmux-style divider line (pane_gap ignored)
+# pane_border = "per_pane"
+
+# Blank cells between adjacent panes when pane_border = "per_pane".
+# Ignored when pane_border = "shared".
 # pane_gap = 0
 
 # Ask for confirmation before closing a workspace

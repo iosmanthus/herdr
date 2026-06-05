@@ -295,11 +295,11 @@ pub(super) fn resize_tab_panes(
         return;
     }
 
-    let panes = tab.layout.panes_with_gap(area, app.pane_gap);
+    let panes = tab.layout.panes_with_gap(area, app.layout_gap());
     let pane_rects: Vec<Rect> = panes.iter().map(|p| p.rect).collect();
     for info in &panes {
         let pane_inner = if multi_pane {
-            if app.pane_gap == 0 {
+            if app.pane_border_shared {
                 single_line_inner_rect(info.rect, &pane_rects)
             } else {
                 Block::default().borders(Borders::ALL).inner(info.rect)
@@ -368,12 +368,12 @@ pub(super) fn compute_pane_infos(
         }];
     }
 
-    let mut pane_infos = ws.layout.panes_with_gap(area, app.pane_gap);
+    let mut pane_infos = ws.layout.panes_with_gap(area, app.layout_gap());
     let pane_rects: Vec<Rect> = pane_infos.iter().map(|p| p.rect).collect();
 
     for info in &mut pane_infos {
         let pane_inner = if multi_pane {
-            if app.pane_gap == 0 {
+            if app.pane_border_shared {
                 single_line_inner_rect(info.rect, &pane_rects)
             } else {
                 Block::default().borders(Borders::ALL).inner(info.rect)
@@ -427,7 +427,7 @@ pub(super) fn render_panes(
 
     for info in &app.view.pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
-            if multi_pane && app.pane_gap > 0 {
+            if multi_pane && !app.pane_border_shared {
                 let (border_style, border_set) = if info.is_focused && terminal_active {
                     (
                         Style::default().fg(app.palette.accent),
@@ -491,7 +491,7 @@ pub(super) fn render_panes(
         }
     }
 
-    if multi_pane && app.pane_gap == 0 {
+    if multi_pane && app.pane_border_shared {
         render_pane_dividers(app, frame, &app.view.pane_infos, ws);
     }
 }

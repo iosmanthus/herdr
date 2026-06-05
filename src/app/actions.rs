@@ -1359,7 +1359,7 @@ impl AppState {
             return;
         };
         let panes = if tab.zoomed {
-            tab.layout.panes_with_gap(self.view.terminal_area, self.pane_gap)
+            tab.layout.panes_with_gap(self.view.terminal_area, self.layout_gap())
         } else {
             self.view.pane_infos.clone()
         };
@@ -1372,7 +1372,7 @@ impl AppState {
     }
 
     pub fn resize_pane(&mut self, direction: NavDirection) {
-        let gap = self.pane_gap;
+        let gap = self.layout_gap();
         if let Some(first) = self.view.pane_infos.first() {
             let area = self
                 .view
