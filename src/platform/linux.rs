@@ -373,6 +373,129 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Restores the host input method to its pre-prefix state when dropped.
+///
+/// Built by [`switch_to_ascii_input_source`] when prefix mode parks the IME in
+/// an ASCII-capable state; `App` drops it on prefix exit, which reverses the
+/// switch on a best-effort basis.
+#[derive(Debug)]
+pub(crate) struct InputSourceRestore {
+    undo: Undo,
+}
+
+impl Drop for InputSourceRestore {
+    fn drop(&mut self) {
+        match &self.undo {
+            Undo::Fcitx5Activate => run_ime("fcitx5-remote", &["-o"]),
+            Undo::IbusSetEngine(engine) => run_ime("ibus", &["engine", engine.as_str()]),
+        }
+    }
+}
+
+/// How to reverse a prefix-mode ASCII switch, per backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Undo {
+    /// fcitx5 was active (composing); re-activate it.
+    Fcitx5Activate,
+    /// ibus was on this engine; switch back to it.
+    IbusSetEngine(String),
+}
+
+/// Host input-method framework herdr knows how to park in ASCII mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImeBackend {
+    Fcitx5,
+    Ibus,
+}
+
+/// Park the host IME in an ASCII-capable state so prefix-mode command keys
+/// reach herdr instead of being eaten as IME input, returning a guard that
+/// restores the previous state on drop.
+///
+/// Returns `None` (no-op) when no supported IME is the active host, it is
+/// already ASCII-capable, or its control tool is unavailable. This is the
+/// Linux counterpart to the macOS input-source switch behind
+/// `[experimental] switch_ascii_input_source_in_prefix`.
+pub(crate) fn switch_to_ascii_input_source() -> Option<InputSourceRestore> {
+    let backend = detect_ime_backend()?;
+    let undo = plan_ascii_switch(backend, &mut |program, args| run_ime_capture(program, args))?;
+    Some(InputSourceRestore { undo })
+}
+
+/// Detect the active IME from the standard input-method environment variables.
+/// `XMODIFIERS` is the authoritative one; fall back to the toolkit hints.
+fn detect_ime_backend() -> Option<ImeBackend> {
+    for key in ["XMODIFIERS", "GTK_IM_MODULE", "QT_IM_MODULE"] {
+        let Ok(value) = std::env::var(key) else {
+            continue;
+        };
+        if value.contains("fcitx") {
+            return Some(ImeBackend::Fcitx5);
+        }
+        if value.contains("ibus") {
+            return Some(ImeBackend::Ibus);
+        }
+    }
+    None
+}
+
+/// Query the backend, switch it to ASCII if it is currently composing, and
+/// return how to undo that. `run` executes an IME command and yields its
+/// trimmed stdout (or `None` on failure); it is injected so this decision logic
+/// is unit-testable without a live IME.
+fn plan_ascii_switch(
+    backend: ImeBackend,
+    run: &mut dyn FnMut(&str, &[&str]) -> Option<String>,
+) -> Option<Undo> {
+    match backend {
+        // fcitx5 has an active/inactive toggle. State codes: 0 closed,
+        // 1 inactive (already ASCII), 2 active (composing). Only deactivate
+        // when it is actually composing.
+        ImeBackend::Fcitx5 => {
+            if run("fcitx5-remote", &[])? != "2" {
+                return None;
+            }
+            run("fcitx5-remote", &["-c"]);
+            Some(Undo::Fcitx5Activate)
+        }
+        // ibus has no global toggle; the ASCII equivalent is selecting an
+        // `xkb:*` keyboard engine. Save the current engine and restore it later.
+        ImeBackend::Ibus => {
+            let current = run("ibus", &["engine"])?;
+            if current.is_empty() || current.starts_with("xkb:") {
+                return None;
+            }
+            run("ibus", &["engine", "xkb:us::eng"]);
+            Some(Undo::IbusSetEngine(current))
+        }
+    }
+}
+
+/// Run an IME control command and return its trimmed stdout, or `None` if it
+/// cannot be spawned or exits non-zero.
+fn run_ime_capture(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Fire-and-forget an IME control command, used by the restore path on drop.
+fn run_ime(program: &str, args: &[&str]) {
+    let _ = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 pub fn read_clipboard_image() -> Option<ClipboardImage> {
     for (mime, extension) in [
         ("image/png", "png"),
@@ -809,6 +932,74 @@ mod tests {
             process_pgrp_and_comm_from_stat("123 (name with ) paren) S 1 456 789 0 456"),
             Some((456, "name with ) paren".to_string()))
         );
+    }
+
+    #[test]
+    fn detect_ime_backend_recognizes_fcitx_ibus_and_unknown() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            std::env::remove_var("GTK_IM_MODULE");
+            std::env::remove_var("QT_IM_MODULE");
+            std::env::set_var("XMODIFIERS", "@im=fcitx");
+        }
+        assert_eq!(detect_ime_backend(), Some(ImeBackend::Fcitx5));
+
+        unsafe { std::env::set_var("XMODIFIERS", "@im=ibus") };
+        assert_eq!(detect_ime_backend(), Some(ImeBackend::Ibus));
+
+        unsafe { std::env::set_var("XMODIFIERS", "@im=none") };
+        assert_eq!(detect_ime_backend(), None);
+    }
+
+    #[test]
+    fn fcitx5_deactivates_only_when_active() {
+        let mut calls: Vec<String> = Vec::new();
+        let undo = plan_ascii_switch(ImeBackend::Fcitx5, &mut |program, args| {
+            calls.push(format!("{program} {}", args.join(" ")));
+            if args.is_empty() {
+                Some("2".to_owned()) // active / composing
+            } else {
+                Some(String::new())
+            }
+        });
+        assert_eq!(undo, Some(Undo::Fcitx5Activate));
+        assert!(calls.iter().any(|c| c.trim() == "fcitx5-remote -c"));
+
+        let undo = plan_ascii_switch(ImeBackend::Fcitx5, &mut |_, args| {
+            args.is_empty()
+                .then(|| "1".to_owned())
+                .or(Some(String::new())) // already inactive
+        });
+        assert_eq!(undo, None);
+    }
+
+    #[test]
+    fn ibus_saves_engine_and_switches_to_ascii() {
+        let mut calls: Vec<String> = Vec::new();
+        let undo = plan_ascii_switch(ImeBackend::Ibus, &mut |program, args| {
+            calls.push(format!("{program} {}", args.join(" ")));
+            match args {
+                ["engine"] => Some("rime".to_owned()),
+                _ => Some(String::new()),
+            }
+        });
+        assert_eq!(undo, Some(Undo::IbusSetEngine("rime".to_owned())));
+        assert!(calls.iter().any(|c| c == "ibus engine xkb:us::eng"));
+    }
+
+    #[test]
+    fn ibus_is_noop_when_already_on_xkb_engine() {
+        let undo = plan_ascii_switch(ImeBackend::Ibus, &mut |_, args| match args {
+            ["engine"] => Some("xkb:us::eng".to_owned()),
+            _ => Some(String::new()),
+        });
+        assert_eq!(undo, None);
+    }
+
+    #[test]
+    fn switch_is_noop_when_backend_query_unavailable() {
+        let undo = plan_ascii_switch(ImeBackend::Fcitx5, &mut |_, _| None);
+        assert_eq!(undo, None);
     }
 
     #[test]
