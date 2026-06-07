@@ -259,11 +259,11 @@ pub(crate) fn parse_agent_env_hint(environ: &[u8]) -> Option<crate::detect::Agen
     None
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[derive(Debug)]
 pub(crate) struct InputSourceRestore;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub(crate) fn switch_to_ascii_input_source() -> Option<InputSourceRestore> {
     None
 }
