@@ -497,10 +497,11 @@ pub struct ExperimentalConfig {
     /// Cursor shape rendered for the IME anchor when
     /// `reveal_hidden_cursor_for_cjk_ime` is enabled. Default: "steady_block".
     pub cjk_ime_cursor_shape: ImeCursorShape,
-    /// While prefix mode is active, temporarily switch the macOS host input
-    /// source to an ASCII-capable keyboard layout so prefix commands are read
-    /// as ASCII even when a CJK IME is active, then restore the previous input
-    /// source when prefix mode exits. macOS only; a no-op elsewhere and a
+    /// While prefix mode is active, temporarily switch the host input source to
+    /// an ASCII-capable state so prefix commands are read as ASCII even when a
+    /// CJK IME is active, then restore the previous state when prefix mode
+    /// exits. macOS switches the system input source; Linux deactivates the
+    /// active IME (fcitx5 or ibus). A no-op on other platforms and a
     /// best-effort no-op if the switch fails. Default: false.
     pub switch_ascii_input_source_in_prefix: bool,
 }
