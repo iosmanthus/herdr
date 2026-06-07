@@ -407,9 +407,10 @@ pane_history = false
 # While prefix mode is active, temporarily switch the host input source to
 # an ASCII-capable mode so prefix commands register even when an IME is
 # active, then restore the previous input source when prefix mode exits. On
-# macOS this selects the ASCII-capable keyboard layout; on Windows it toggles
-# a Korean IME between Hangul and English (other IME languages are left
-# unchanged). macOS and Windows only; best-effort. Default: false.
+# macOS this selects the ASCII-capable keyboard layout; on Linux it deactivates
+# the active IME (fcitx5 or ibus); on Windows it toggles a Korean IME between
+# Hangul and English (other IME languages are left unchanged). macOS, Linux and
+# Windows only; best-effort. Default: false.
 # switch_ascii_input_source_in_prefix = false
 # Expose the focused pane's cursor to the outer terminal so macOS input
 # methods keep tracking the candidate window when TUIs paint their own
