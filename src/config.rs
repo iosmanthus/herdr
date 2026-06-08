@@ -18,9 +18,9 @@ pub use self::{
         IndexedKeybind, Keybinds, LiveKeybindConfig,
     },
     model::{
-        validated_sidebar_bounds, AgentPanelScopeConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, KeysConfig, NewTerminalCwdConfig, ShellModeConfig, ToastConfig,
-        ToastDelivery, UpdateChannelConfig,
+        extended_keys, set_extended_keys, validated_sidebar_bounds, AgentPanelScopeConfig, Config,
+        ConfigReloadReport, ConfigReloadStatus, ExtendedKeysConfig, KeysConfig,
+        NewTerminalCwdConfig, ShellModeConfig, ToastConfig, ToastDelivery, UpdateChannelConfig,
     },
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},

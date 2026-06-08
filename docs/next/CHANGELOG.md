@@ -10,6 +10,7 @@
 
 ### Added
 - Added `herdr integration install droid` for Factory Droid hooks that report session ids through Herdr's socket API. When native agent session restore is enabled, Herdr can resume Droid panes with `droid --resume <id>`.
+- Added a `terminal.extended_keys` option (`auto` | `off` | `always`, default `auto`) controlling whether modified keys with no legacy byte form (Shift+Enter, Ctrl+Tab, …) are forwarded to panes in their Kitty CSI u / modifyOtherKeys encoding. The default `auto` only forwards them when the pane program enabled an enhanced keyboard protocol, so plain shells no longer receive sequences like `ESC[27;2;13~` for Shift+Enter (which a line editor such as zsh would misread as an edit command, e.g. toggling the case of the last character).
 
 ## [0.6.8] - 2026-06-04
 

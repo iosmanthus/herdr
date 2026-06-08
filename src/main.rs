@@ -97,6 +97,15 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # "current" for Herdr's process directory, or a fixed path such as "~/Projects".
 # new_cwd = "follow"
 
+# Whether to forward "extended" key encodings (CSI u / modifyOtherKeys) for keys
+# with no legacy byte form, such as Shift+Enter or Ctrl+Tab.
+# "auto"   - honor the pane: only when the program enabled the Kitty keyboard
+#            protocol or xterm modifyOtherKeys mode 2 (default).
+# "off"    - never; modified keys fall back to their legacy byte (Shift+Enter ->
+#            Enter), avoiding line-editor corruption in plain shells.
+# "always" - always send extended encodings, even if the program never asked.
+# extended_keys = "auto"
+
 [update]
 # Update channel used by background checks and `herdr update`.
 # Use "stable" for normal releases or "preview" for opt-in preview builds.

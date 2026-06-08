@@ -85,6 +85,15 @@ new_cwd = "follow"
 
 `new_cwd = "follow"` keeps the default behavior and inherits the source pane or workspace. When there is no source workspace, Herdr starts in `$HOME`. Use `"home"` to always start in `$HOME`, `"current"` to use Herdr's process directory, or a fixed path such as `"~/Projects"`. Explicit `--cwd` values from the CLI or socket API still take precedence.
 
+Control whether modified keys that have no legacy byte form (such as Shift+Enter or Ctrl+Tab) are forwarded to panes in their "extended" encoding (Kitty CSI u or xterm modifyOtherKeys):
+
+```toml
+[terminal]
+extended_keys = "auto"
+```
+
+`extended_keys = "auto"` honors the running program: the extended encoding is sent only when the program enabled the Kitty keyboard protocol or xterm modifyOtherKeys mode 2. Use `"off"` to never send it — modified keys fall back to their legacy byte (Shift+Enter becomes Enter), which avoids line-editor corruption in plain shells that don't understand these sequences. Use `"always"` to send the extended encoding even when the program never requested it. Keys that already have a legacy modified form (arrows, function keys, Shift+Tab, …) are unaffected.
+
 ## Worktrees
 
 Set the root directory Herdr uses for Git worktree checkouts created from the sidebar:

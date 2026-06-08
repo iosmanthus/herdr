@@ -157,6 +157,45 @@ pub enum ShellModeConfig {
     NonLogin,
 }
 
+/// Policy for sending the "extended" (CSI u / modifyOtherKeys) encoding of
+/// modified keys that have no legacy byte form (Shift+Enter, Ctrl+Tab, ...) to a
+/// pane. Mirrors tmux's `extended-keys` option.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum ExtendedKeysConfig {
+    /// Never emit extended encodings; modified keys fall back to their legacy
+    /// byte (Shift+Enter -> CR), even if the pane negotiated an enhanced
+    /// keyboard protocol. (tmux: `off`)
+    Off = 0,
+    /// Honor the pane: emit extended encodings only when the running program
+    /// pushed the Kitty keyboard protocol or enabled xterm modifyOtherKeys
+    /// mode 2. (tmux: `on`)
+    #[default]
+    Auto = 1,
+    /// Always emit extended encodings for keys that have one, even if the pane
+    /// never asked. (tmux: `always`)
+    Always = 2,
+}
+
+static EXTENDED_KEYS: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(ExtendedKeysConfig::Auto as u8);
+
+/// Publish the process-wide `extended_keys` policy (called when config is
+/// loaded or reloaded). Like tmux's `extended-keys`, this is a global option.
+pub fn set_extended_keys(mode: ExtendedKeysConfig) {
+    EXTENDED_KEYS.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Read the process-wide `extended_keys` policy.
+pub fn extended_keys() -> ExtendedKeysConfig {
+    match EXTENDED_KEYS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => ExtendedKeysConfig::Off,
+        2 => ExtendedKeysConfig::Always,
+        _ => ExtendedKeysConfig::Auto,
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
@@ -166,6 +205,9 @@ pub struct TerminalConfig {
     pub shell_mode: ShellModeConfig,
     /// CWD policy for new interactive panes, tabs, and workspaces.
     pub new_cwd: NewTerminalCwdConfig,
+    /// Policy for forwarding extended (CSI u / modifyOtherKeys) key encodings to
+    /// panes. Default: honor the pane's negotiated mode (`auto`).
+    pub extended_keys: ExtendedKeysConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -681,6 +723,24 @@ shell_mode = "non_login"
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.terminal.default_shell, "nu");
         assert_eq!(config.terminal.shell_mode, ShellModeConfig::NonLogin);
+    }
+
+    #[test]
+    fn terminal_extended_keys_defaults_auto_and_parses() {
+        assert_eq!(
+            Config::default().terminal.extended_keys,
+            ExtendedKeysConfig::Auto
+        );
+
+        for (value, expected) in [
+            ("off", ExtendedKeysConfig::Off),
+            ("auto", ExtendedKeysConfig::Auto),
+            ("always", ExtendedKeysConfig::Always),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[terminal]\nextended_keys = \"{value}\"\n")).unwrap();
+            assert_eq!(config.terminal.extended_keys, expected, "value={value}");
+        }
     }
 
     #[test]
