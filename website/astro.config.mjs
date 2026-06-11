@@ -70,7 +70,7 @@ export default defineConfig({
       head: [
         {
           tag: 'meta',
-          attrs: { property: 'og:image', content: 'https://herdr.dev/assets/og-card-v6.png' },
+          attrs: { property: 'og:image', content: 'https://herdr.dev/assets/og-card-v8.png' },
         },
         { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
         { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
@@ -83,7 +83,7 @@ export default defineConfig({
         },
         {
           tag: 'meta',
-          attrs: { name: 'twitter:image', content: 'https://herdr.dev/assets/og-card-v6.png' },
+          attrs: { name: 'twitter:image', content: 'https://herdr.dev/assets/og-card-v8.png' },
         },
         {
           tag: 'meta',
@@ -104,6 +104,7 @@ export default defineConfig({
           items: [
             { label: 'Overview', slug: 'docs' },
             { label: 'Install', slug: 'docs/install' },
+            { label: 'Windows beta', slug: 'docs/windows-beta' },
             { label: 'Quick start', slug: 'docs/quick-start' },
             { label: 'How to work with Herdr', slug: 'docs/how-to-work' },
             { label: 'Concepts', slug: 'docs/concepts' },

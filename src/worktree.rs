@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_WORKTREE_PREFIX: &str = "worktree";
@@ -53,19 +54,86 @@ pub(crate) fn branch_to_path_slug(branch: &str) -> String {
 }
 
 pub(crate) fn expand_tilde_path(path: &str) -> PathBuf {
+    expand_tilde_path_from_env(path, cfg!(windows), |key| std::env::var_os(key))
+}
+
+fn expand_tilde_path_from_env(
+    path: &str,
+    is_windows: bool,
+    env: impl Fn(&str) -> Option<OsString> + Copy,
+) -> PathBuf {
     if path == "~" {
-        return std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(path));
+        return home_dir_from_env(is_windows, env).unwrap_or_else(|_| PathBuf::from(path));
     }
 
-    if let Some(rest) = path.strip_prefix("~/") {
-        return std::env::var("HOME")
-            .map(|home| PathBuf::from(home).join(rest))
+    let tilde_rest = path.strip_prefix("~/").or_else(|| {
+        if is_windows {
+            path.strip_prefix("~\\")
+        } else {
+            None
+        }
+    });
+    if let Some(rest) = tilde_rest {
+        return home_dir_from_env(is_windows, env)
+            .map(|home| join_tilde_rest(home, rest, is_windows))
             .unwrap_or_else(|_| PathBuf::from(path));
     }
 
     PathBuf::from(path)
+}
+
+fn join_tilde_rest(home: PathBuf, rest: &str, is_windows: bool) -> PathBuf {
+    if is_windows {
+        rest.split(['/', '\\'])
+            .filter(|component| !component.is_empty())
+            .fold(home, |path, component| path.join(component))
+    } else {
+        home.join(rest)
+    }
+}
+
+fn home_dir_from_env(
+    is_windows: bool,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Result<PathBuf, ()> {
+    if !is_windows {
+        return env("HOME").map(PathBuf::from).ok_or(());
+    }
+
+    if let Some(path) = usable_home_path(env("USERPROFILE")) {
+        return Ok(path);
+    }
+    if let (Some(drive), Some(path)) = (
+        usable_home_component(env("HOMEDRIVE")),
+        usable_home_component(env("HOMEPATH")),
+    ) {
+        let path = path.to_string_lossy();
+        if !path.starts_with(['\\', '/']) {
+            return usable_home_path(env("HOME")).ok_or(());
+        }
+        let combined = format!("{}{}", drive.to_string_lossy(), path);
+        if let Some(path) = usable_home_path(Some(OsString::from(combined))) {
+            return Ok(path);
+        }
+    }
+
+    usable_home_path(env("HOME")).ok_or(())
+}
+
+fn usable_home_path(value: Option<OsString>) -> Option<PathBuf> {
+    let value = value?;
+    if value.is_empty() || value == "~" {
+        return None;
+    }
+    Some(PathBuf::from(value))
+}
+
+fn usable_home_component(value: Option<OsString>) -> Option<OsString> {
+    let value = value?;
+    if value.is_empty() || value == "~" {
+        return None;
+    }
+    Some(value)
 }
 
 pub(crate) fn expand_tilde_absolute_path(path: &str) -> PathBuf {
@@ -113,6 +181,43 @@ pub(crate) fn is_dirty_worktree_remove_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("contains modified or untracked files")
         && lower.contains("use --force to delete it")
+}
+
+#[cfg(windows)]
+pub(crate) fn worktree_dirty_remove_message(path: &Path) -> String {
+    format!(
+        "fatal: '{}' contains modified or untracked files, use --force to delete it",
+        path.display()
+    )
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn checkout_has_dirty_files(path: &Path) -> Result<bool, String> {
+    let path_arg = path.display().to_string();
+    let output = std::process::Command::new("git")
+        .args([
+            "-C",
+            &path_arg,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ])
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if output.status.success() {
+        return Ok(!output.stdout.is_empty());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stderr.is_empty() {
+        Err(stderr)
+    } else if !stdout.is_empty() {
+        Err(stdout)
+    } else {
+        Err(format!("git status failed with status {}", output.status))
+    }
 }
 
 pub(crate) fn build_worktree_add_new_branch_command(
@@ -352,21 +457,99 @@ prunable stale
 
     #[test]
     fn expand_tilde_path_uses_home_when_available() {
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", "/home/me");
         assert_eq!(
-            expand_tilde_path("~/.herdr/worktrees"),
+            expand_tilde_path_from_env("~/.herdr/worktrees", false, |key| match key {
+                "HOME" => Some("/home/me".into()),
+                _ => None,
+            }),
             PathBuf::from("/home/me/.herdr/worktrees")
         );
         assert_eq!(
-            expand_tilde_path("/tmp/worktrees"),
+            expand_tilde_path_from_env("/tmp/worktrees", false, |_| None),
             PathBuf::from("/tmp/worktrees")
         );
-        if let Some(home) = old_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn home_dir_uses_windows_profile_before_literal_home() {
+        assert_eq!(
+            home_dir_from_env(true, |key| match key {
+                "HOME" => Some("~".into()),
+                "USERPROFILE" => Some(r"C:\Users\herdr".into()),
+                _ => None,
+            }),
+            Ok(PathBuf::from(r"C:\Users\herdr"))
+        );
+    }
+
+    #[test]
+    fn home_dir_uses_windows_drive_and_path_when_profile_is_missing() {
+        assert_eq!(
+            home_dir_from_env(true, |key| match key {
+                "HOMEDRIVE" => Some("C:".into()),
+                "HOMEPATH" => Some(r"\Users\herdr".into()),
+                _ => None,
+            }),
+            Ok(PathBuf::from(r"C:\Users\herdr"))
+        );
+    }
+
+    #[test]
+    fn home_dir_rejects_incomplete_windows_drive_and_path() {
+        assert_eq!(
+            home_dir_from_env(true, |key| match key {
+                "HOMEDRIVE" => Some("C:".into()),
+                "HOMEPATH" => Some("".into()),
+                _ => None,
+            }),
+            Err(())
+        );
+        assert_eq!(
+            home_dir_from_env(true, |key| match key {
+                "HOMEDRIVE" => Some("C:".into()),
+                "HOMEPATH" => Some("Users\\herdr".into()),
+                _ => None,
+            }),
+            Err(())
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_tilde_expansion_keeps_windows_separator_literal() {
+        assert_eq!(
+            expand_tilde_path_from_env(r"~\.herdr\worktrees", false, |key| match key {
+                "HOME" => Some("/home/me".into()),
+                _ => None,
+            }),
+            PathBuf::from(r"~\.herdr\worktrees")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_tilde_expansion_normalizes_separators() {
+        fn env(key: &str) -> Option<OsString> {
+            match key {
+                "HOME" => Some("~".into()),
+                "USERPROFILE" => Some(r"C:\Users\herdr".into()),
+                _ => None,
+            }
         }
+
+        let default_path = expand_tilde_path_from_env("~/.herdr/worktrees", true, env);
+        assert_eq!(
+            default_path,
+            PathBuf::from(r"C:\Users\herdr\.herdr\worktrees")
+        );
+        assert_eq!(
+            default_path.display().to_string(),
+            r"C:\Users\herdr\.herdr\worktrees"
+        );
+        assert_eq!(
+            expand_tilde_path_from_env(r"~\.herdr\worktrees", true, env),
+            PathBuf::from(r"C:\Users\herdr\.herdr\worktrees")
+        );
     }
 
     #[test]
@@ -379,6 +562,32 @@ prunable stale
             ),
             PathBuf::from("/home/me/.herdr/worktrees/herdr/worktree-brave-river")
         );
+    }
+
+    #[test]
+    fn checkout_dirty_detection_reports_clean_and_dirty_worktrees() {
+        let repo = create_committed_repo("worktree-dirty-detection-repo");
+        let checkout = unique_temp_path("worktree-dirty-detection-checkout");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "worktree/dirty-detection",
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+
+        assert_eq!(checkout_has_dirty_files(&checkout), Ok(false));
+        std::fs::write(checkout.join("README.md"), "dirty\n").unwrap();
+        assert_eq!(checkout_has_dirty_files(&checkout), Ok(true));
+
+        let remove = build_worktree_remove_command(&repo, &checkout, true);
+        run_worktree_command(&remove).unwrap();
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     #[test]

@@ -205,6 +205,21 @@ impl App {
         }
 
         if self
+            .state
+            .next_pending_agent_notification_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let previous_toast = self.state.toast.clone();
+            let mut deliveries = self.state.drain_due_agent_notifications(now);
+            if !deliveries.is_empty() {
+                self.refresh_agent_notification_delivery_contexts(&mut deliveries);
+                self.emit_delayed_client_local_agent_notifications(&deliveries);
+                self.sync_toast_deadline(previous_toast);
+                changed = true;
+            }
+        }
+
+        if self
             .copy_feedback_deadline
             .is_some_and(|deadline| now >= deadline)
         {
@@ -239,6 +254,13 @@ impl App {
             .is_some_and(|deadline| now >= deadline)
         {
             self.run_auto_update_check();
+        }
+
+        if self
+            .next_agent_manifest_update_check
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.run_agent_manifest_update_check();
         }
 
         if self
@@ -433,6 +455,18 @@ impl App {
         std::thread::spawn(move || crate::update::auto_update(update_tx));
     }
 
+    pub(crate) fn run_agent_manifest_update_check(&mut self) {
+        if !auto_updates_enabled(self.no_session) {
+            self.next_agent_manifest_update_check = None;
+            return;
+        }
+
+        self.next_agent_manifest_update_check = Some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL);
+
+        let manifest_update_tx = self.event_tx.clone();
+        std::thread::spawn(move || crate::detect::manifest_update::auto_update(manifest_update_tx));
+    }
+
     pub(crate) fn start_git_status_refresh_if_due(&mut self, now: Instant) {
         let Some(deadline) = self.git_refresh_deadline() else {
             return;
@@ -509,12 +543,14 @@ impl App {
             include_resize_poll.then_some(self.next_resize_poll),
             self.config_diagnostic_deadline,
             self.toast_deadline,
+            self.state.next_pending_agent_notification_deadline(),
             self.copy_feedback_deadline,
             self.next_animation_tick,
             include_git_refresh
                 .then(|| self.git_refresh_deadline())
                 .flatten(),
             self.next_auto_update_check,
+            self.next_agent_manifest_update_check,
             self.agent_metadata_deadline,
             self.pending_agent_resume_deadline,
             self.session_save_deadline,

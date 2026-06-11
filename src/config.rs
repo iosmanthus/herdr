@@ -20,7 +20,8 @@ pub use self::{
     model::{
         extended_keys, set_extended_keys, validated_sidebar_bounds, AgentPanelScopeConfig, Config,
         ConfigReloadReport, ConfigReloadStatus, ExtendedKeysConfig, KeysConfig,
-        NewTerminalCwdConfig, ShellModeConfig, ToastConfig, ToastDelivery, UpdateChannelConfig,
+        NewTerminalCwdConfig, ShellModeConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
+        ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},

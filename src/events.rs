@@ -33,7 +33,6 @@ pub enum AppEvent {
         agent: Option<Agent>,
         state: AgentState,
         visible_blocker: bool,
-        visible_idle: bool,
         visible_working: bool,
         process_exited: bool,
         observed_at: Instant,
@@ -93,9 +92,20 @@ pub enum AppEvent {
         version: String,
         install_command: String,
     },
+    /// Remote agent detection manifest update check finished.
+    AgentDetectionManifestsUpdated {
+        updated: Vec<crate::detect::manifest_update::ManifestUpdateCommit>,
+        status: crate::detect::manifest_update::ManifestUpdateStatus,
+    },
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
     ClipboardWrite { content: Vec<u8> },
+    /// A pane child reported its shell current directory through terminal
+    /// metadata such as OSC 7.
+    TerminalCwdReported {
+        pane_id: PaneId,
+        cwd: std::path::PathBuf,
+    },
     /// Background git status refresh completed for workspaces.
     GitStatusRefreshed {
         results: Vec<WorkspaceGitStatus>,
