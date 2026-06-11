@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- `terminal.extended_keys = "auto"` no longer behaves like `always` once a pane has printed any output: the modifyOtherKeys detection misread replayed screen content as keyboard state, so Shift+Enter / Ctrl+Enter leaked extended sequences to plain shells instead of falling back to CR.
 - Pane output now renders flag emoji and other multi-codepoint grapheme clusters as complete symbols instead of blank cells. (#243)
 - Starting Herdr with no restored workspaces, or closing the last workspace, now opens a default workspace instead of leaving the client on an empty screen where direct keybindings such as `cmd+n` were shown but ignored. (#366)
 - Resizing restored panes no longer aborts the server when libghostty-vt reflows a terminal whose pre-resize cursor row is past the new height. (#465)

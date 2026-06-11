@@ -851,14 +851,40 @@ impl Terminal {
     }
 
     pub fn keyboard_state_ansi(&self) -> Result<String, Error> {
-        self.format_keyboard_state_ansi(false)
+        self.format_keyboard_state_ansi(false, None)
     }
 
     pub fn kitty_keyboard_state_ansi(&self) -> Result<String, Error> {
-        self.format_keyboard_state_ansi(true)
+        self.format_keyboard_state_ansi(true, None)
     }
 
-    fn format_keyboard_state_ansi(&self, kitty_keyboard: bool) -> Result<String, Error> {
+    /// Whether the running program enabled xterm modifyOtherKeys mode 2
+    /// (`CSI > 4 ; 2 m`).
+    ///
+    /// The C API only exposes this flag through the formatter, which always
+    /// replays screen content alongside the requested extras and appends the
+    /// exact `ESC[>4;2m` token when (and only when) the mode is set. Restrict
+    /// content to a single cell so the check doesn't format the whole screen,
+    /// and match the token itself — cell text can never contain a raw ESC
+    /// byte, so content cannot fake it.
+    pub fn modify_other_keys_2(&self) -> Result<bool, Error> {
+        let origin = self.grid_ref(ghostty_screen_point(0, 0))?;
+        let selection = ffi::GhosttySelection {
+            size: mem::size_of::<ffi::GhosttySelection>(),
+            start: origin,
+            end: origin,
+            rectangle: false,
+        };
+        Ok(self
+            .format_keyboard_state_ansi(false, Some(&selection))?
+            .contains("\x1b[>4;2m"))
+    }
+
+    fn format_keyboard_state_ansi(
+        &self,
+        kitty_keyboard: bool,
+        selection: Option<&ffi::GhosttySelection>,
+    ) -> Result<String, Error> {
         let mut formatter: ffi::GhosttyFormatter_ptr = ptr::null_mut();
         let options = ffi::GhosttyFormatterTerminalOptions {
             size: mem::size_of::<ffi::GhosttyFormatterTerminalOptions>(),
@@ -875,7 +901,7 @@ impl Terminal {
                 },
                 ..Default::default()
             },
-            selection: ptr::null(),
+            selection: selection.map_or(ptr::null(), |selection| selection),
         };
         unsafe {
             ffi::ghostty_formatter_terminal_new(ptr::null(), &mut formatter, self.raw, options)

@@ -800,10 +800,7 @@ impl GhosttyPaneTerminal {
             return false;
         };
         let kitty = core.terminal.kitty_keyboard_flags().is_ok_and(|f| f != 0);
-        let modify_other_keys = core
-            .terminal
-            .keyboard_state_ansi()
-            .is_ok_and(|ansi| !ansi.is_empty());
+        let modify_other_keys = core.terminal.modify_other_keys_2().unwrap_or(false);
         kitty || modify_other_keys
     }
 
@@ -863,11 +860,7 @@ impl GhosttyPaneTerminal {
             mouse_protocol_mode,
             mouse_protocol_encoding,
             mouse_alternate_scroll,
-            modify_other_keys: core
-                .terminal
-                .keyboard_state_ansi()
-                .ok()
-                .is_some_and(|ansi| !ansi.is_empty()),
+            modify_other_keys: core.terminal.modify_other_keys_2().unwrap_or(false),
         })
     }
 
@@ -2229,6 +2222,28 @@ mod tests {
         assert_eq!(enc_mode(&pane, KC::Tab, KM::SHIFT, auto), b"\x1b[Z");
         assert_eq!(enc_mode(&pane, KC::Up, KM::SHIFT, auto), b"\x1b[1;2A");
         assert_eq!(enc_mode(&pane, KC::Delete, KM::SHIFT, auto), b"\x1b[3;2~");
+    }
+
+    #[test]
+    fn extended_keys_auto_stays_legacy_after_pane_prints_output() {
+        use crossterm::event::{KeyCode as KC, KeyModifiers as KM};
+        let (tx, _rx) = mpsc::channel(4);
+        let pane = plain_pane(tx.clone());
+        // Every real pane has screen content (shell prompt, command output).
+        // Content alone must not flip the modifyOtherKeys detection: only the
+        // pane's keyboard state may. Regression test for `auto` acting like
+        // `always` on any non-empty pane.
+        pane.process_pty_bytes(PaneId::from_raw(1), 0, b"user@host ~ % ls\r\nsrc\r\n% ", &tx);
+        assert!(pane.input_state().is_some_and(|state| !state.modify_other_keys));
+        let auto = crate::config::ExtendedKeysConfig::Auto;
+        assert_eq!(enc_mode(&pane, KC::Enter, KM::SHIFT, auto), b"\r");
+        assert_eq!(enc_mode(&pane, KC::Enter, KM::CONTROL, auto), b"\r");
+        assert_eq!(enc_mode(&pane, KC::Enter, KM::CONTROL | KM::SHIFT, auto), b"\r");
+        // A pane that really enabled modifyOtherKeys mode 2 still gets the
+        // extended encoding.
+        pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b[>4;2m", &tx);
+        assert!(pane.input_state().is_some_and(|state| state.modify_other_keys));
+        assert_eq!(enc_mode(&pane, KC::Enter, KM::SHIFT, auto), b"\x1b[27;2;13~");
     }
 
     #[test]
