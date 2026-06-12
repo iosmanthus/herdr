@@ -578,6 +578,21 @@ pub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Re
     show_desktop_notification_with_command(title, body, |program| Command::new(program))
 }
 
+/// Click-to-focus actions are not wired up on macOS yet; deliver a plain
+/// notification (terminal-notifier already activates the terminal on click).
+pub fn show_desktop_notification_with_click_action(
+    title: &str,
+    body: Option<&str>,
+    _on_click: Box<dyn FnOnce() + Send>,
+) -> std::io::Result<bool> {
+    show_desktop_notification(title, body)
+}
+
+/// Window activation on notification click is not implemented on macOS.
+pub fn activate_host_terminal_window() -> bool {
+    false
+}
+
 fn show_desktop_notification_with_command(
     title: &str,
     body: Option<&str>,

@@ -336,6 +336,13 @@ pub(crate) enum ServerEvent {
         row: Option<u16>,
         modifiers: u8,
     },
+    /// A client requested focusing a specific pane, e.g. after the user
+    /// clicked a system notification carrying a pane target.
+    ClientFocusPane {
+        client_id: u64,
+        workspace_id: String,
+        pane_id: u32,
+    },
     /// A client sent a resize message.
     ClientResize {
         client_id: u64,
@@ -834,6 +841,14 @@ fn client_read_loop(
                 column,
                 row,
                 modifiers,
+            },
+            ClientMessage::FocusPane {
+                workspace_id,
+                pane_id,
+            } => ServerEvent::ClientFocusPane {
+                client_id,
+                workspace_id,
+                pane_id,
             },
             ClientMessage::Hello { .. } => {
                 // Duplicate Hello — ignore.
@@ -1465,6 +1480,49 @@ new_tab = "ctrl+notakey"
                 assert_eq!(actual, events);
             }
             other => panic!("expected ClientInputEvents, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("read thread join")
+            .expect("read thread result");
+    }
+
+    #[test]
+    fn client_read_loop_forwards_focus_pane() {
+        let (mut client_stream, server_stream, _path) = local_stream_pair("client-read-focus-pane");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::FocusPane {
+                workspace_id: "ws-1".to_owned(),
+                pane_id: 42,
+            },
+        )
+        .expect("write focus pane");
+
+        match server_event_rx
+            .blocking_recv()
+            .expect("client focus pane event")
+        {
+            ServerEvent::ClientFocusPane {
+                client_id,
+                workspace_id,
+                pane_id,
+            } => {
+                assert_eq!(client_id, 7);
+                assert_eq!(workspace_id, "ws-1");
+                assert_eq!(pane_id, 42);
+            }
+            other => panic!("expected ClientFocusPane, got {other:?}"),
         }
 
         drop(client_stream);

@@ -814,6 +814,9 @@ enum ClientLoopEvent {
     Resize(u16, u16, u32, u32),
     /// Server message received.
     ServerMessage(ServerMessage),
+    /// The user clicked a system notification that names a pane; ask the
+    /// server to focus it.
+    NotificationClicked(crate::protocol::NotifyTarget),
     /// Server reader thread exited (connection lost).
     ServerDisconnected,
     /// Timer tick.
@@ -1598,8 +1601,16 @@ async fn run_client_loop(
                     kind,
                     message,
                     body,
+                    target,
                 } => {
-                    handle_notify(kind, &message, body.as_deref(), &state.sound_config);
+                    handle_notify(
+                        kind,
+                        &message,
+                        body.as_deref(),
+                        target,
+                        &state.sound_config,
+                        &event_tx,
+                    );
                 }
                 ServerMessage::Clipboard { data } => {
                     forward_clipboard(&data);
@@ -1651,6 +1662,15 @@ async fn run_client_loop(
                     debug!("received unexpected Welcome in main loop");
                 }
             },
+            ClientLoopEvent::NotificationClicked(target) => {
+                let msg = ClientMessage::FocusPane {
+                    workspace_id: target.workspace_id,
+                    pane_id: target.pane_id,
+                };
+                if let Err(e) = write_to_server(&mut write_stream, &msg) {
+                    return Err(ClientError::ConnectionLost(e));
+                }
+            }
             ClientLoopEvent::ServerDisconnected => {
                 return Err(ClientError::ConnectionLost(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -1789,15 +1809,28 @@ fn handle_notify(
     kind: NotifyKind,
     message: &str,
     body: Option<&str>,
+    target: Option<crate::protocol::NotifyTarget>,
     sound_config: &crate::config::SoundConfig,
+    event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) {
+    // When the notification names a pane, clicking it raises the hosting
+    // terminal window and asks the server to focus that pane.
+    let click_action = target.map(|target| {
+        let event_tx = event_tx.clone();
+        Box::new(move || {
+            crate::platform::activate_host_terminal_window();
+            let _ = event_tx.blocking_send(ClientLoopEvent::NotificationClicked(target));
+        }) as Box<dyn FnOnce() + Send>
+    });
     handle_notify_with_notifiers(
         kind,
         message,
         body,
+        click_action,
         sound_config,
         crate::terminal_notify::show_notification,
         crate::platform::show_desktop_notification,
+        crate::platform::show_desktop_notification_with_click_action,
     );
 }
 
@@ -1805,9 +1838,15 @@ fn handle_notify_with_notifiers(
     kind: NotifyKind,
     message: &str,
     body: Option<&str>,
+    click_action: Option<Box<dyn FnOnce() + Send>>,
     sound_config: &crate::config::SoundConfig,
     mut show_terminal_notification: impl FnMut(&str, Option<&str>) -> io::Result<bool>,
     mut show_system_notification: impl FnMut(&str, Option<&str>) -> io::Result<bool>,
+    mut show_system_notification_with_click: impl FnMut(
+        &str,
+        Option<&str>,
+        Box<dyn FnOnce() + Send>,
+    ) -> io::Result<bool>,
 ) {
     match kind {
         NotifyKind::Sound => {
@@ -1836,7 +1875,11 @@ fn handle_notify_with_notifiers(
                 message = message,
                 "received system toast notification from server"
             );
-            if let Err(err) = show_system_notification(message, body) {
+            let result = match click_action {
+                Some(on_click) => show_system_notification_with_click(message, body, on_click),
+                None => show_system_notification(message, body),
+            };
+            if let Err(err) = result {
                 warn!(err = %err, "failed to emit system notification");
             }
         }
@@ -2988,12 +3031,14 @@ mod tests {
             NotifyKind::Toast,
             "pi finished",
             Some("workspace 1"),
+            None,
             &sound_config,
             |title, body| {
                 emitted = Some((title.to_string(), body.map(str::to_string)));
                 Ok(true)
             },
             |_, _| Ok(false),
+            |_, _, _| Ok(false),
         );
 
         assert_eq!(
@@ -3011,12 +3056,14 @@ mod tests {
             NotifyKind::SystemToast,
             "pi finished",
             Some("workspace 1"),
+            None,
             &sound_config,
             |_, _| Ok(false),
             |title, body| {
                 emitted = Some((title.to_string(), body.map(str::to_string)));
                 Ok(true)
             },
+            |_, _, _| Ok(false),
         );
 
         assert_eq!(
@@ -3034,12 +3081,14 @@ mod tests {
             NotifyKind::SystemToast,
             "build: failed",
             Some("api workspace"),
+            None,
             &sound_config,
             |_, _| Ok(false),
             |title, body| {
                 emitted = Some((title.to_string(), body.map(str::to_string)));
                 Ok(true)
             },
+            |_, _, _| Ok(false),
         );
 
         assert_eq!(
@@ -3049,6 +3098,45 @@ mod tests {
                 Some("api workspace".to_string())
             ))
         );
+    }
+
+    #[test]
+    fn system_toast_with_click_action_uses_click_capable_notifier() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let sound_config = crate::config::SoundConfig::default();
+        let clicked = Arc::new(AtomicBool::new(false));
+        let clicked_in_action = clicked.clone();
+        let mut plain_emitted = false;
+        let mut emitted = None;
+
+        handle_notify_with_notifiers(
+            NotifyKind::SystemToast,
+            "codex finished",
+            Some("ws · 1"),
+            Some(Box::new(move || {
+                clicked_in_action.store(true, Ordering::SeqCst)
+            })),
+            &sound_config,
+            |_, _| Ok(false),
+            |_, _| {
+                plain_emitted = true;
+                Ok(false)
+            },
+            |title, body, on_click| {
+                emitted = Some((title.to_string(), body.map(str::to_string)));
+                on_click();
+                Ok(true)
+            },
+        );
+
+        assert_eq!(
+            emitted,
+            Some(("codex finished".to_string(), Some("ws · 1".to_string())))
+        );
+        assert!(!plain_emitted);
+        assert!(clicked.load(Ordering::SeqCst));
     }
 
     #[test]

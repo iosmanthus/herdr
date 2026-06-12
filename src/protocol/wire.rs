@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -428,6 +428,15 @@ pub enum ClientMessage {
         /// Replace an existing writable controller for this terminal.
         takeover: bool,
     },
+
+    /// Focus a specific pane, e.g. after the user clicked a system
+    /// notification that carried a [`NotifyTarget`].
+    FocusPane {
+        /// Workspace id owning the pane.
+        workspace_id: String,
+        /// Raw pane id (see `layout::PaneId::raw`).
+        pane_id: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -624,6 +633,16 @@ pub struct TerminalFrame {
     pub bytes: Vec<u8>,
 }
 
+/// Pane a notification refers to, so the client can ask the server to focus
+/// it when the user activates (clicks) the notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyTarget {
+    /// Workspace id owning the pane.
+    pub workspace_id: String,
+    /// Raw pane id (see `layout::PaneId::raw`).
+    pub pane_id: u32,
+}
+
 /// Notification kind forwarded from server to client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NotifyKind {
@@ -675,6 +694,9 @@ pub enum ServerMessage {
         message: String,
         /// Optional human-readable notification body.
         body: Option<String>,
+        /// Pane the notification refers to; lets the client request focusing
+        /// it when the user activates the notification.
+        target: Option<NotifyTarget>,
     },
 
     /// OSC 52 clipboard data forwarded from a PTY through the server.
@@ -1461,12 +1483,42 @@ mod tests {
                 kind,
                 message: "agent done".to_owned(),
                 body: None,
+                target: None,
             };
             let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
             let (decoded, _): (ServerMessage, _) =
                 bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
             assert_eq!(msg, decoded);
         }
+    }
+
+    #[test]
+    fn server_notify_roundtrip_preserves_focus_target() {
+        let msg = ServerMessage::Notify {
+            kind: NotifyKind::SystemToast,
+            message: "codex finished".to_owned(),
+            body: Some("ws · 1".to_owned()),
+            target: Some(NotifyTarget {
+                workspace_id: "ws-1".to_owned(),
+                pane_id: 42,
+            }),
+        };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn client_focus_pane_roundtrip() {
+        let msg = ClientMessage::FocusPane {
+            workspace_id: "ws-1".to_owned(),
+            pane_id: 42,
+        };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ClientMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
     }
 
     #[test]

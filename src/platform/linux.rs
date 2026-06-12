@@ -676,6 +676,139 @@ fn show_desktop_notification_with_command(
     run_notification_command(cmd)
 }
 
+/// Show a desktop notification with a default click action. `on_click` runs
+/// on a background thread when the user activates (clicks) the notification.
+///
+/// Uses `notify-send --action` (libnotify ≥ 0.8), which blocks until the
+/// notification is activated, dismissed, or expires and prints the action key
+/// to stdout on activation. When the installed notify-send predates action
+/// support the command fails up front and `fallback` re-delivers the
+/// notification without an action.
+pub fn show_desktop_notification_with_click_action(
+    title: &str,
+    body: Option<&str>,
+    on_click: Box<dyn FnOnce() + Send>,
+) -> std::io::Result<bool> {
+    let fallback_title = title.to_owned();
+    let fallback_body = body.map(str::to_owned);
+    show_desktop_notification_with_click_action_with_command(
+        title,
+        body,
+        on_click,
+        Box::new(move || {
+            let _ = show_desktop_notification(&fallback_title, fallback_body.as_deref());
+        }),
+        |program| Command::new(program),
+    )
+    .map(|handle| handle.is_some())
+}
+
+fn show_desktop_notification_with_click_action_with_command(
+    title: &str,
+    body: Option<&str>,
+    on_click: Box<dyn FnOnce() + Send>,
+    fallback: Box<dyn FnOnce() + Send>,
+    mut command: impl FnMut(&str) -> Command,
+) -> std::io::Result<Option<std::thread::JoinHandle<()>>> {
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Ok(None);
+    }
+
+    let mut cmd = command("notify-send");
+    cmd.arg("--app-name").arg("herdr");
+    cmd.arg("--icon").arg("herdr");
+    cmd.arg("--hint").arg("string:desktop-entry:herdr");
+    cmd.arg("--action").arg("default=Open");
+    cmd.arg("--").arg(title);
+    if let Some(body) = body.filter(|body| !body.is_empty()) {
+        cmd.arg(body);
+    }
+
+    let child = match cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+
+    Ok(Some(std::thread::spawn(
+        move || match wait_for_notification_click(child) {
+            NotificationClickWait::Clicked => on_click(),
+            NotificationClickWait::Dismissed => {}
+            NotificationClickWait::ActionUnsupported => fallback(),
+        },
+    )))
+}
+
+/// Outcome of waiting on an action-capable `notify-send` invocation.
+#[derive(Debug, PartialEq, Eq)]
+enum NotificationClickWait {
+    /// The user activated the notification's default action.
+    Clicked,
+    /// The notification was dismissed or expired without activation.
+    Dismissed,
+    /// The command failed, e.g. a libnotify too old for `--action`.
+    ActionUnsupported,
+}
+
+fn wait_for_notification_click(mut child: std::process::Child) -> NotificationClickWait {
+    use std::io::Read as _;
+
+    let mut output = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut output);
+    }
+    match child.wait() {
+        Ok(status) if status.success() => {
+            if output.lines().next().map(str::trim) == Some("default") {
+                NotificationClickWait::Clicked
+            } else {
+                NotificationClickWait::Dismissed
+            }
+        }
+        _ => NotificationClickWait::ActionUnsupported,
+    }
+}
+
+/// Raise the X11 window hosting this client, identified by `$WINDOWID`
+/// (set by kitty and most X terminals). Best effort: returns false when the
+/// id is missing or no activation tool is available.
+pub fn activate_host_terminal_window() -> bool {
+    let Some(window_id) = std::env::var("WINDOWID")
+        .ok()
+        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+    else {
+        return false;
+    };
+
+    for (program, args) in window_activation_commands(&window_id) {
+        let status = Command::new(program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if status.is_ok_and(|status| status.success()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn window_activation_commands(window_id: &str) -> Vec<(&'static str, Vec<String>)> {
+    vec![
+        (
+            "xdotool",
+            vec!["windowactivate".to_owned(), window_id.to_owned()],
+        ),
+        ("wmctrl", vec!["-ia".to_owned(), window_id.to_owned()]),
+    ]
+}
+
 fn run_notification_command(mut command: Command) -> std::io::Result<bool> {
     let status = match command
         .stdin(Stdio::null())
@@ -1425,6 +1558,160 @@ mod tests {
             b"BM text is not a bitmap"
         ));
         assert!(!bytes_match_image_signature("svg", b"<svg></svg>"));
+    }
+
+    #[test]
+    fn notification_click_wait_reports_clicked_on_default_action() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("printf 'default\\n'")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn fake notify-send");
+        assert_eq!(
+            wait_for_notification_click(child),
+            NotificationClickWait::Clicked
+        );
+    }
+
+    #[test]
+    fn notification_click_wait_reports_dismissed_without_action_output() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn fake notify-send");
+        assert_eq!(
+            wait_for_notification_click(child),
+            NotificationClickWait::Dismissed
+        );
+    }
+
+    #[test]
+    fn notification_click_wait_reports_unsupported_on_command_failure() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("exit 2")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn fake notify-send");
+        assert_eq!(
+            wait_for_notification_click(child),
+            NotificationClickWait::ActionUnsupported
+        );
+    }
+
+    #[test]
+    fn desktop_notification_with_click_action_adds_action_and_invokes_callback() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::set_var("DISPLAY", ":0");
+        }
+
+        let path =
+            std::env::temp_dir().join(format!("herdr-notify-action-args-{}", std::process::id()));
+        let script = "printf '%s\\n' \"$@\" > \"$HERDR_NOTIFY_ARGS\"; printf 'default\\n'";
+        let clicked = Arc::new(AtomicBool::new(false));
+        let clicked_in_callback = clicked.clone();
+        let fallback_used = Arc::new(AtomicBool::new(false));
+        let fallback_in_callback = fallback_used.clone();
+
+        let handle = show_desktop_notification_with_click_action_with_command(
+            "codex finished",
+            Some("ws · 1"),
+            Box::new(move || clicked_in_callback.store(true, Ordering::SeqCst)),
+            Box::new(move || fallback_in_callback.store(true, Ordering::SeqCst)),
+            |_| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c")
+                    .arg(script)
+                    .arg("notify-send")
+                    .env("HERDR_NOTIFY_ARGS", &path);
+                cmd
+            },
+        )
+        .expect("notification command should run")
+        .expect("notification should be shown");
+        handle.join().expect("watcher thread");
+
+        let args = std::fs::read_to_string(&path).expect("args file");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            args,
+            "--app-name\nherdr\n--icon\nherdr\n--hint\nstring:desktop-entry:herdr\n--action\ndefault=Open\n--\ncodex finished\nws · 1\n"
+        );
+        assert!(clicked.load(Ordering::SeqCst));
+        assert!(!fallback_used.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn desktop_notification_with_click_action_falls_back_when_actions_unsupported() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::set_var("DISPLAY", ":0");
+        }
+
+        let clicked = Arc::new(AtomicBool::new(false));
+        let clicked_in_callback = clicked.clone();
+        let fallback_used = Arc::new(AtomicBool::new(false));
+        let fallback_in_callback = fallback_used.clone();
+
+        let handle = show_desktop_notification_with_click_action_with_command(
+            "codex finished",
+            None,
+            Box::new(move || clicked_in_callback.store(true, Ordering::SeqCst)),
+            Box::new(move || fallback_in_callback.store(true, Ordering::SeqCst)),
+            |_| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg("exit 1").arg("notify-send");
+                cmd
+            },
+        )
+        .expect("notification command should run")
+        .expect("notification should be shown");
+        handle.join().expect("watcher thread");
+
+        assert!(!clicked.load(Ordering::SeqCst));
+        assert!(fallback_used.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn window_activation_commands_target_window_id() {
+        let commands = window_activation_commands("12345678");
+        assert_eq!(
+            commands,
+            vec![
+                (
+                    "xdotool",
+                    vec!["windowactivate".to_owned(), "12345678".to_owned()]
+                ),
+                ("wmctrl", vec!["-ia".to_owned(), "12345678".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn activate_host_terminal_window_requires_numeric_window_id() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe { std::env::remove_var("WINDOWID") };
+        assert!(!activate_host_terminal_window());
+
+        unsafe { std::env::set_var("WINDOWID", "not-a-number") };
+        assert!(!activate_host_terminal_window());
+        unsafe { std::env::remove_var("WINDOWID") };
     }
 
     #[test]
