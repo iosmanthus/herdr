@@ -26,7 +26,7 @@ pub(crate) fn toast_message_from_state_change(
     prev_state: AgentState,
     new_state: AgentState,
     previous_agent_label: Option<&str>,
-) -> Option<String> {
+) -> Option<(String, protocol::NotifyTarget)> {
     state
         .workspaces
         .iter()
@@ -46,14 +46,29 @@ pub(crate) fn toast_message_from_state_change(
                     Some(agent_label),
                 )?;
                 let workspace_label = ws.display_name_from(&state.terminals, terminal_runtimes);
-                Some(format!(
-                    "{} {}: {}",
-                    agent_label,
-                    toast_event_text(kind),
-                    app::actions::notification_context(ws, &workspace_label, ws_idx, pane_id)
+                Some((
+                    format!(
+                        "{} {}: {}",
+                        agent_label,
+                        toast_event_text(kind),
+                        app::actions::notification_context(ws, &workspace_label, ws_idx, pane_id)
+                    ),
+                    protocol::NotifyTarget {
+                        workspace_id: ws.id.clone(),
+                        pane_id: pane_id.raw(),
+                    },
                 ))
             })
         })
+}
+
+pub(crate) fn notify_target_for_toast(
+    target: &crate::app::state::ToastTarget,
+) -> protocol::NotifyTarget {
+    protocol::NotifyTarget {
+        workspace_id: target.workspace_id.clone(),
+        pane_id: target.pane_id.raw(),
+    }
 }
 
 fn toast_event_text(kind: app::state::ToastKind) -> &'static str {
@@ -134,6 +149,7 @@ mod tests {
         let mut terminal_runtimes = TerminalRuntimeRegistry::new();
         terminal_runtimes.insert(terminal_id, runtime);
 
+        let workspace_id = state.workspaces[0].id.clone();
         let message = toast_message_from_state_change(
             &state,
             &terminal_runtimes,
@@ -145,8 +161,14 @@ mod tests {
         );
 
         assert_eq!(
-            message.as_deref(),
-            Some("codex finished: __herdr_projects__ · 1")
+            message,
+            Some((
+                "codex finished: __herdr_projects__ · 1".to_owned(),
+                protocol::NotifyTarget {
+                    workspace_id,
+                    pane_id: root.raw(),
+                },
+            ))
         );
 
         for (_, runtime) in terminal_runtimes.drain() {

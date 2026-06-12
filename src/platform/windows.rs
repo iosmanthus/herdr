@@ -624,6 +624,20 @@ pub fn show_desktop_notification(_title: &str, _body: Option<&str>) -> std::io::
     Ok(false)
 }
 
+/// Click-to-focus actions are not wired up on Windows yet.
+pub fn show_desktop_notification_with_click_action(
+    title: &str,
+    body: Option<&str>,
+    _on_click: Box<dyn FnOnce() + Send>,
+) -> std::io::Result<bool> {
+    show_desktop_notification(title, body)
+}
+
+/// Window activation on notification click is not implemented on Windows.
+pub fn activate_host_terminal_window() -> bool {
+    false
+}
+
 fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
