@@ -2298,7 +2298,7 @@ mod tests {
         assert!(super::is_extended_key_sequence(b"\x1b[27;5;9~")); // Ctrl+Tab modifyOtherKeys
         assert!(super::is_extended_key_sequence(b"\x1b[13;2u")); // Shift+Enter kitty CSI u
         assert!(super::is_extended_key_sequence(b"\x1b[97;6u")); // Ctrl+Shift+a kitty CSI u
-        // NOT extended — legacy forms that must be preserved.
+                                                                 // NOT extended — legacy forms that must be preserved.
         assert!(!super::is_extended_key_sequence(b"\x1b[5;2~")); // Shift+PageUp (ends in ~, not 27;)
         assert!(!super::is_extended_key_sequence(b"\x1b[15;2~")); // Shift+F5
         assert!(!super::is_extended_key_sequence(b"\x1b[1;2A")); // Shift+Up
@@ -2340,7 +2340,7 @@ mod tests {
         assert_eq!(enc_mode(&pane, KC::Enter, KM::SHIFT, auto), b"\r");
         assert_eq!(enc_mode(&pane, KC::Tab, KM::CONTROL, auto), b"\t"); // was leaking ESC[27;5;9~
         assert_eq!(enc_mode(&pane, KC::Esc, KM::SHIFT, auto), b"\x1b"); // was leaking ESC[27;2;27~
-        // Keys with a legacy modified form must be preserved untouched.
+                                                                        // Keys with a legacy modified form must be preserved untouched.
         assert_eq!(enc_mode(&pane, KC::Tab, KM::SHIFT, auto), b"\x1b[Z");
         assert_eq!(enc_mode(&pane, KC::Up, KM::SHIFT, auto), b"\x1b[1;2A");
         assert_eq!(enc_mode(&pane, KC::Delete, KM::SHIFT, auto), b"\x1b[3;2~");
@@ -2355,17 +2355,32 @@ mod tests {
         // Content alone must not flip the modifyOtherKeys detection: only the
         // pane's keyboard state may. Regression test for `auto` acting like
         // `always` on any non-empty pane.
-        pane.process_pty_bytes(PaneId::from_raw(1), 0, b"user@host ~ % ls\r\nsrc\r\n% ", &tx);
-        assert!(pane.input_state().is_some_and(|state| !state.modify_other_keys));
+        pane.process_pty_bytes(
+            PaneId::from_raw(1),
+            0,
+            b"user@host ~ % ls\r\nsrc\r\n% ",
+            &tx,
+        );
+        assert!(pane
+            .input_state()
+            .is_some_and(|state| !state.modify_other_keys));
         let auto = crate::config::ExtendedKeysConfig::Auto;
         assert_eq!(enc_mode(&pane, KC::Enter, KM::SHIFT, auto), b"\r");
         assert_eq!(enc_mode(&pane, KC::Enter, KM::CONTROL, auto), b"\r");
-        assert_eq!(enc_mode(&pane, KC::Enter, KM::CONTROL | KM::SHIFT, auto), b"\r");
+        assert_eq!(
+            enc_mode(&pane, KC::Enter, KM::CONTROL | KM::SHIFT, auto),
+            b"\r"
+        );
         // A pane that really enabled modifyOtherKeys mode 2 still gets the
         // extended encoding.
         pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b[>4;2m", &tx);
-        assert!(pane.input_state().is_some_and(|state| state.modify_other_keys));
-        assert_eq!(enc_mode(&pane, KC::Enter, KM::SHIFT, auto), b"\x1b[27;2;13~");
+        assert!(pane
+            .input_state()
+            .is_some_and(|state| state.modify_other_keys));
+        assert_eq!(
+            enc_mode(&pane, KC::Enter, KM::SHIFT, auto),
+            b"\x1b[27;2;13~"
+        );
     }
 
     #[test]
@@ -2376,7 +2391,10 @@ mod tests {
         let off = crate::config::ExtendedKeysConfig::Off;
         assert_eq!(enc_mode(&pane, KC::Enter, KM::SHIFT, off), b"\r");
         // Char keys also respect `off`: Ctrl+Shift+a -> C0, not ESC[97;6u.
-        assert_eq!(enc_mode(&pane, KC::Char('a'), KM::CONTROL | KM::SHIFT, off), b"\x01");
+        assert_eq!(
+            enc_mode(&pane, KC::Char('a'), KM::CONTROL | KM::SHIFT, off),
+            b"\x01"
+        );
     }
 
     #[test]
@@ -2385,8 +2403,14 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let pane = plain_pane(tx);
         let always = crate::config::ExtendedKeysConfig::Always;
-        assert_eq!(enc_mode(&pane, KC::Enter, KM::SHIFT, always), b"\x1b[27;2;13~");
-        assert_eq!(enc_mode(&pane, KC::Tab, KM::CONTROL, always), b"\x1b[27;5;9~");
+        assert_eq!(
+            enc_mode(&pane, KC::Enter, KM::SHIFT, always),
+            b"\x1b[27;2;13~"
+        );
+        assert_eq!(
+            enc_mode(&pane, KC::Tab, KM::CONTROL, always),
+            b"\x1b[27;5;9~"
+        );
     }
 
     #[test]

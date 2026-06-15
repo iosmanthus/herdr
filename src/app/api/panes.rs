@@ -325,7 +325,10 @@ impl App {
             .workspaces
             .get_mut(ws_idx)
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
-            .is_some_and(|tab| tab.layout.resize_pane(pane_id, direction, amount, area, gap));
+            .is_some_and(|tab| {
+                tab.layout
+                    .resize_pane(pane_id, direction, amount, area, gap)
+            });
         if changed {
             self.schedule_session_save();
         }

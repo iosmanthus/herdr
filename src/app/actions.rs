@@ -1513,7 +1513,8 @@ impl AppState {
             return;
         };
         let panes = if tab.zoomed {
-            tab.layout.panes_with_gap(self.view.terminal_area, self.layout_gap())
+            tab.layout
+                .panes_with_gap(self.view.terminal_area, self.layout_gap())
         } else {
             self.view.pane_infos.clone()
         };

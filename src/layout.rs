@@ -398,7 +398,13 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, gap: u16, result: &mut 
     }
 }
 
-fn collect_splits(node: &Node, area: Rect, path: Vec<bool>, gap: u16, result: &mut Vec<SplitBorder>) {
+fn collect_splits(
+    node: &Node,
+    area: Rect,
+    path: Vec<bool>,
+    gap: u16,
+    result: &mut Vec<SplitBorder>,
+) {
     if let Node::Split {
         direction,
         ratio,
@@ -747,7 +753,13 @@ mod tests {
         let mut layout = sample_layout();
         let original_focus = layout.focused();
 
-        assert!(layout.resize_pane(pane(1), NavDirection::Right, 0.05, Rect::new(0, 0, 100, 40), 0));
+        assert!(layout.resize_pane(
+            pane(1),
+            NavDirection::Right,
+            0.05,
+            Rect::new(0, 0, 100, 40),
+            0
+        ));
 
         assert_eq!(layout.focused(), original_focus);
         let split = split_snapshot(&layout)[0];
@@ -775,7 +787,13 @@ mod tests {
         let right = horizontal.split_focused(Direction::Horizontal);
         let horizontal_before = split_snapshot(&horizontal);
 
-        assert!(!horizontal.resize_pane(left, NavDirection::Left, 0.05, Rect::new(0, 0, 100, 40), 0));
+        assert!(!horizontal.resize_pane(
+            left,
+            NavDirection::Left,
+            0.05,
+            Rect::new(0, 0, 100, 40),
+            0
+        ));
         assert!(!horizontal.resize_pane(
             right,
             NavDirection::Right,
@@ -790,7 +808,13 @@ mod tests {
         let vertical_before = split_snapshot(&vertical);
 
         assert!(!vertical.resize_pane(top, NavDirection::Up, 0.05, Rect::new(0, 0, 100, 40), 0));
-        assert!(!vertical.resize_pane(bottom, NavDirection::Down, 0.05, Rect::new(0, 0, 100, 40), 0));
+        assert!(!vertical.resize_pane(
+            bottom,
+            NavDirection::Down,
+            0.05,
+            Rect::new(0, 0, 100, 40),
+            0
+        ));
         assert_eq!(split_snapshot(&vertical), vertical_before);
     }
 
@@ -816,7 +840,13 @@ mod tests {
             pane(3),
         );
 
-        assert!(layout.resize_pane(pane(3), NavDirection::Right, 0.05, Rect::new(0, 0, 100, 40), 0));
+        assert!(layout.resize_pane(
+            pane(3),
+            NavDirection::Right,
+            0.05,
+            Rect::new(0, 0, 100, 40),
+            0
+        ));
 
         let splits = split_snapshot(&layout);
         assert_eq!(splits[0], (Direction::Vertical, 0.5));
