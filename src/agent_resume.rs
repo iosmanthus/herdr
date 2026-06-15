@@ -113,98 +113,248 @@ pub fn session_ref_from_snapshot(
     })
 }
 
+/// Resume plan for the canonical command with no recorded launch arguments —
+/// equivalent to [`plan_with_launch_argv`] with `launch_argv = None`. Used by
+/// production resumability checks and by tests.
 pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<AgentResumePlan> {
+    plan_with_launch_argv(source, agent, session_ref, None)
+}
+
+/// Build a resume plan, optionally restoring the pane's original launch command
+/// verbatim.
+///
+/// When `launch_argv` records the exact command herdr used to start the agent,
+/// resume it as-is and append the agent's resume reference. This preserves
+/// launch flags such as `--dangerously-skip-permissions` or `--model` across a
+/// restart. Without a recorded launch command (e.g. agents detected from a
+/// hand-typed shell), fall back to the canonical program name plus the resume
+/// reference, matching the historical behavior.
+pub fn plan_with_launch_argv(
+    source: &str,
+    agent: &str,
+    session_ref: &AgentSessionRef,
+    launch_argv: Option<&[String]>,
+) -> Option<AgentResumePlan> {
     if !is_official_agent_source(source, agent) {
         return None;
     }
 
-    let argv = match (source, agent, session_ref.kind) {
-        ("herdr:claude", "claude", AgentSessionRefKind::Id) => {
-            vec![
-                "claude".into(),
-                "--resume".into(),
-                session_ref.value.clone(),
-            ]
+    let (canonical_program, resume_args) = resume_components(source, agent, session_ref)?;
+
+    // When replaying a recorded launch command, strip any session selector it
+    // already carries (e.g. `--resume <id>`, `--continue`, codex's `resume`
+    // subcommand) before appending our own. This guarantees the replayed
+    // command never ends up with two conflicting selectors.
+    //
+    // Only replay a launch command that belongs to the agent we are resuming.
+    // `launch_argv` is a per-terminal field filled once (`set_launch_argv_if_empty`)
+    // and never cleared, so a terminal reused across agents keeps the first
+    // agent's command while its persisted session becomes the second agent's.
+    // Replaying the foreign command would relaunch the wrong binary and carry a
+    // foreign `--resume <other-session>` that this agent's selector rules cannot
+    // strip — resuming the wrong session id. Fall back to the canonical command.
+    let mut argv = match launch_argv {
+        Some(launch) if launch_argv_matches_agent(agent, launch) => {
+            let mut argv = Vec::with_capacity(launch.len() + resume_args.len());
+            argv.push(launch[0].clone());
+            argv.extend(strip_session_selectors(agent, &launch[1..]));
+            argv
         }
-        ("herdr:codex", "codex", AgentSessionRefKind::Id) => {
-            vec!["codex".into(), "resume".into(), session_ref.value.clone()]
-        }
-        ("herdr:copilot", "copilot", AgentSessionRefKind::Id) => {
-            vec!["copilot".into(), format!("--resume={}", session_ref.value)]
-        }
-        ("herdr:devin", "devin", AgentSessionRefKind::Id) => {
-            vec!["devin".into(), "--resume".into(), session_ref.value.clone()]
-        }
-        ("herdr:droid", "droid", AgentSessionRefKind::Id) => {
-            vec!["droid".into(), "--resume".into(), session_ref.value.clone()]
-        }
-        ("herdr:kimi", "kimi", AgentSessionRefKind::Id) => {
-            vec!["kimi".into(), "--session".into(), session_ref.value.clone()]
-        }
-        ("herdr:mastracode", "mastracode", AgentSessionRefKind::Id) => {
-            vec![
-                "mastracode".into(),
-                "--thread".into(),
-                session_ref.value.clone(),
-            ]
-        }
-        ("herdr:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
-            vec!["pi".into(), "--session".into(), session_ref.value.clone()]
-        }
-        ("herdr:omp", "omp", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
-            // omp resume is `-r, --resume=<value>` (ID prefix or path); it has no
-            // `--session` flag, unlike pi.
-            vec!["omp".into(), format!("--resume={}", session_ref.value)]
-        }
-        ("herdr:hermes", "hermes", AgentSessionRefKind::Id) => {
-            vec![
-                "hermes".into(),
-                "--resume".into(),
-                session_ref.value.clone(),
-            ]
-        }
-        ("herdr:opencode", "opencode", AgentSessionRefKind::Id) => {
-            vec![
-                "opencode".into(),
-                "--session".into(),
-                session_ref.value.clone(),
-            ]
-        }
-        ("herdr:qodercli", "qodercli", AgentSessionRefKind::Id) => {
-            vec![
-                "qodercli".into(),
-                "--resume".into(),
-                session_ref.value.clone(),
-            ]
-        }
-        ("herdr:kilo", "kilo", AgentSessionRefKind::Id) => {
-            vec!["kilo".into(), "--session".into(), session_ref.value.clone()]
-        }
-        ("herdr:cursor", "cursor", AgentSessionRefKind::Id) => {
-            vec![
-                "cursor-agent".into(),
-                "--resume".into(),
-                session_ref.value.clone(),
-            ]
-        }
-        ("herdr:antigravity_cli", "agy", AgentSessionRefKind::Id) => {
-            vec![
-                "agy".into(),
-                "--conversation".into(),
-                session_ref.value.clone(),
-            ]
-        }
-        ("herdr:grok", "grok", AgentSessionRefKind::Id) => {
-            vec!["grok".into(), "--resume".into(), session_ref.value.clone()]
-        }
-        _ => return None,
+        _ => vec![canonical_program.to_string()],
     };
+    argv.extend(resume_args);
 
     Some(AgentResumePlan {
         agent: agent.to_string(),
         argv,
         dedupe_key: dedupe_key(source, agent, session_ref),
     })
+}
+
+/// Whether a recorded launch command was captured for the agent we are about to
+/// resume. Uses the same resolution as capture ([`crate::detect::direct_launch_argv`]):
+/// the command's program token (argv0) must be a direct invocation of `agent`.
+/// A non-empty, agent-matching command is safe to replay verbatim; anything else
+/// (empty, a wrapper, or another agent's binary) is rejected so the caller falls
+/// back to the canonical resume command.
+fn launch_argv_matches_agent(agent: &str, launch: &[String]) -> bool {
+    crate::detect::parse_agent_label(agent)
+        .is_some_and(|expected| crate::detect::direct_launch_argv(expected, launch).is_some())
+}
+
+/// Map a supported `(source, agent, session ref)` to its canonical program name
+/// and the trailing arguments that select the saved session.
+fn resume_components(
+    source: &str,
+    agent: &str,
+    session_ref: &AgentSessionRef,
+) -> Option<(&'static str, Vec<String>)> {
+    let value = &session_ref.value;
+    let components = match (source, agent, session_ref.kind) {
+        ("herdr:claude", "claude", AgentSessionRefKind::Id) => {
+            ("claude", vec!["--resume".into(), value.clone()])
+        }
+        ("herdr:codex", "codex", AgentSessionRefKind::Id) => {
+            ("codex", vec!["resume".into(), value.clone()])
+        }
+        ("herdr:copilot", "copilot", AgentSessionRefKind::Id) => {
+            ("copilot", vec![format!("--resume={value}")])
+        }
+        ("herdr:devin", "devin", AgentSessionRefKind::Id) => {
+            ("devin", vec!["--resume".into(), value.clone()])
+        }
+        ("herdr:droid", "droid", AgentSessionRefKind::Id) => {
+            ("droid", vec!["--resume".into(), value.clone()])
+        }
+        ("herdr:kimi", "kimi", AgentSessionRefKind::Id) => {
+            ("kimi", vec!["--session".into(), value.clone()])
+        }
+        ("herdr:mastracode", "mastracode", AgentSessionRefKind::Id) => {
+            ("mastracode", vec!["--thread".into(), value.clone()])
+        }
+        ("herdr:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
+            ("pi", vec!["--session".into(), value.clone()])
+        }
+        // omp resume is `-r, --resume=<value>` (ID prefix or path); it has no
+        // `--session` flag, unlike pi.
+        ("herdr:omp", "omp", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
+            ("omp", vec![format!("--resume={value}")])
+        }
+        ("herdr:hermes", "hermes", AgentSessionRefKind::Id) => {
+            ("hermes", vec!["--resume".into(), value.clone()])
+        }
+        ("herdr:opencode", "opencode", AgentSessionRefKind::Id) => {
+            ("opencode", vec!["--session".into(), value.clone()])
+        }
+        ("herdr:qodercli", "qodercli", AgentSessionRefKind::Id) => {
+            ("qodercli", vec!["--resume".into(), value.clone()])
+        }
+        ("herdr:kilo", "kilo", AgentSessionRefKind::Id) => {
+            ("kilo", vec!["--session".into(), value.clone()])
+        }
+        ("herdr:cursor", "cursor", AgentSessionRefKind::Id) => {
+            ("cursor-agent", vec!["--resume".into(), value.clone()])
+        }
+        ("herdr:antigravity_cli", "agy", AgentSessionRefKind::Id) => {
+            ("agy", vec!["--conversation".into(), value.clone()])
+        }
+        ("herdr:grok", "grok", AgentSessionRefKind::Id) => {
+            ("grok", vec!["--resume".into(), value.clone()])
+        }
+        _ => return None,
+    };
+    Some(components)
+}
+
+/// Session-selecting tokens an agent's CLI understands, so a recorded launch
+/// command can be replayed without colliding with the resume reference we
+/// append. Mirrors the selectors emitted by [`resume_components`].
+struct SessionSelectors {
+    /// Flags that take a following value (`--resume <id>`); also matched in
+    /// `--flag=value` form. The value token is dropped too when present.
+    value_flags: &'static [&'static str],
+    /// Boolean flags with no value (`--continue`); also matched as `--flag=...`.
+    bool_flags: &'static [&'static str],
+    /// A bare positional subcommand (`codex resume <id>`); the following value
+    /// token is dropped too when present.
+    subcommand: Option<&'static str>,
+}
+
+fn session_selectors(agent: &str) -> SessionSelectors {
+    match agent {
+        // claude exposes both `--resume`/`-r` (specific or picker) and
+        // `--continue`/`-c` (latest conversation).
+        "claude" => SessionSelectors {
+            value_flags: &["--resume", "-r"],
+            bool_flags: &["--continue", "-c"],
+            subcommand: None,
+        },
+        // codex selects via the `resume` subcommand; its `-c`/`--config`
+        // override is unrelated and must survive.
+        "codex" => SessionSelectors {
+            value_flags: &[],
+            bool_flags: &[],
+            subcommand: Some("resume"),
+        },
+        // devin uses `--resume <id>`; omp uses the `--resume=<value>` eq form —
+        // both matched by the `--resume` value flag (eq form handled in strip).
+        "copilot" | "droid" | "hermes" | "qodercli" | "cursor" | "devin" | "omp" | "grok" => {
+            SessionSelectors {
+                value_flags: &["--resume"],
+                bool_flags: &[],
+                subcommand: None,
+            }
+        }
+        "mastracode" => SessionSelectors {
+            value_flags: &["--thread"],
+            bool_flags: &[],
+            subcommand: None,
+        },
+        "agy" => SessionSelectors {
+            value_flags: &["--conversation"],
+            bool_flags: &[],
+            subcommand: None,
+        },
+        "kimi" | "pi" | "opencode" | "kilo" => SessionSelectors {
+            value_flags: &["--session"],
+            bool_flags: &[],
+            subcommand: None,
+        },
+        _ => SessionSelectors {
+            value_flags: &[],
+            bool_flags: &[],
+            subcommand: None,
+        },
+    }
+}
+
+/// Drop any pre-existing session selector from a recorded launch command's
+/// arguments (everything after the program name).
+fn strip_session_selectors(agent: &str, args: &[String]) -> Vec<String> {
+    let selectors = session_selectors(agent);
+    let eq_form = |flag: &&str, token: &str| -> bool {
+        flag.starts_with("--")
+            && token
+                .strip_prefix(*flag)
+                .is_some_and(|rest| rest.starts_with('='))
+    };
+
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut subcommand_dropped = false;
+    let mut i = 0;
+    while i < args.len() {
+        let token = args[i].as_str();
+
+        let is_value_flag = selectors.value_flags.contains(&token);
+        let is_value_flag_eq = selectors
+            .value_flags
+            .iter()
+            .any(|flag| eq_form(flag, token));
+        let is_bool_flag = selectors
+            .bool_flags
+            .iter()
+            .any(|flag| token == *flag || eq_form(flag, token));
+        let is_subcommand =
+            !subcommand_dropped && selectors.subcommand.is_some_and(|sub| token == sub);
+
+        if is_value_flag || is_subcommand {
+            subcommand_dropped |= is_subcommand;
+            i += 1;
+            // Drop the following value when it isn't itself another flag.
+            if i < args.len() && !args[i].starts_with('-') {
+                i += 1;
+            }
+            continue;
+        }
+        if is_value_flag_eq || is_bool_flag {
+            i += 1;
+            continue;
+        }
+
+        out.push(args[i].clone());
+        i += 1;
+    }
+    out
 }
 
 pub fn dedupe_key(source: &str, agent: &str, session_ref: &AgentSessionRef) -> String {
@@ -619,6 +769,329 @@ mod tests {
 
         let devin_plan = plan("herdr:devin", "devin", &AgentSessionRef::id(id).unwrap()).unwrap();
         assert_eq!(devin_plan.argv, vec!["devin", "--resume", id]);
+    }
+
+    #[test]
+    fn launch_argv_is_resumed_verbatim_with_resume_suffix() {
+        let launch = vec![
+            "claude".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+            "--model".to_string(),
+            "opus".to_string(),
+        ];
+        let plan = plan_with_launch_argv(
+            "herdr:claude",
+            "claude",
+            &AgentSessionRef::id("claude-session").unwrap(),
+            Some(&launch),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude",
+                "--dangerously-skip-permissions",
+                "--model",
+                "opus",
+                "--resume",
+                "claude-session",
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_or_empty_launch_argv_falls_back_to_canonical_program() {
+        let session = AgentSessionRef::id("claude-session").unwrap();
+        let expected = vec!["claude", "--resume", "claude-session"];
+
+        let with_none = plan_with_launch_argv("herdr:claude", "claude", &session, None).unwrap();
+        let empty: Vec<String> = Vec::new();
+        let with_empty =
+            plan_with_launch_argv("herdr:claude", "claude", &session, Some(&empty)).unwrap();
+
+        assert_eq!(with_none.argv, expected);
+        assert_eq!(with_empty.argv, expected);
+        // The historical 3-arg entry point keeps the same fallback behavior.
+        assert_eq!(
+            with_none.argv,
+            plan("herdr:claude", "claude", &session).unwrap().argv
+        );
+    }
+
+    #[test]
+    fn launch_argv_preserves_original_program_token() {
+        let launch = vec!["/usr/bin/claude".to_string()];
+        let plan = plan_with_launch_argv(
+            "herdr:claude",
+            "claude",
+            &AgentSessionRef::id("claude-session").unwrap(),
+            Some(&launch),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.argv,
+            vec!["/usr/bin/claude", "--resume", "claude-session"]
+        );
+    }
+
+    #[test]
+    fn launch_argv_appends_codex_resume_subcommand_after_flags() {
+        let launch = vec![
+            "codex".to_string(),
+            "--model".to_string(),
+            "gpt-5".to_string(),
+        ];
+        let plan = plan_with_launch_argv(
+            "herdr:codex",
+            "codex",
+            &AgentSessionRef::id("codex-session").unwrap(),
+            Some(&launch),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.argv,
+            vec!["codex", "--model", "gpt-5", "resume", "codex-session"]
+        );
+    }
+
+    #[test]
+    fn launch_argv_strips_existing_claude_resume_selector() {
+        let launch = vec![
+            "claude".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+            "--resume".to_string(),
+            "old-session".to_string(),
+        ];
+        let plan = plan_with_launch_argv(
+            "herdr:claude",
+            "claude",
+            &AgentSessionRef::id("new-session").unwrap(),
+            Some(&launch),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude",
+                "--dangerously-skip-permissions",
+                "--resume",
+                "new-session",
+            ]
+        );
+        // Exactly one resume selector survives in the replayed command.
+        assert_eq!(plan.argv.iter().filter(|a| *a == "--resume").count(), 1);
+    }
+
+    #[test]
+    fn launch_argv_strips_claude_continue_and_short_flags() {
+        let launch = vec![
+            "claude".to_string(),
+            "-c".to_string(),
+            "-r".to_string(),
+            "old-session".to_string(),
+            "--model".to_string(),
+            "opus".to_string(),
+        ];
+        let plan = plan_with_launch_argv(
+            "herdr:claude",
+            "claude",
+            &AgentSessionRef::id("new-session").unwrap(),
+            Some(&launch),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.argv,
+            vec!["claude", "--model", "opus", "--resume", "new-session"]
+        );
+    }
+
+    #[test]
+    fn launch_argv_strips_bare_resume_and_eq_form() {
+        // A bare `--resume` (interactive picker) must not swallow the next flag.
+        let bare = vec![
+            "claude".to_string(),
+            "--resume".to_string(),
+            "--model".to_string(),
+            "opus".to_string(),
+        ];
+        assert_eq!(
+            plan_with_launch_argv(
+                "herdr:claude",
+                "claude",
+                &AgentSessionRef::id("new-session").unwrap(),
+                Some(&bare),
+            )
+            .unwrap()
+            .argv,
+            vec!["claude", "--model", "opus", "--resume", "new-session"]
+        );
+
+        let eq_form = vec!["claude".to_string(), "--resume=old".to_string()];
+        assert_eq!(
+            plan_with_launch_argv(
+                "herdr:claude",
+                "claude",
+                &AgentSessionRef::id("new-session").unwrap(),
+                Some(&eq_form),
+            )
+            .unwrap()
+            .argv,
+            vec!["claude", "--resume", "new-session"]
+        );
+    }
+
+    #[test]
+    fn launch_argv_strips_codex_resume_subcommand_but_keeps_config() {
+        let launch = vec![
+            "codex".to_string(),
+            "-c".to_string(),
+            "model=gpt-5".to_string(),
+            "resume".to_string(),
+            "old-session".to_string(),
+        ];
+        let plan = plan_with_launch_argv(
+            "herdr:codex",
+            "codex",
+            &AgentSessionRef::id("new-session").unwrap(),
+            Some(&launch),
+        )
+        .unwrap();
+        // codex `-c` is a config override, not `--continue`; it must survive,
+        // while the existing `resume <id>` subcommand is replaced.
+        assert_eq!(
+            plan.argv,
+            vec!["codex", "-c", "model=gpt-5", "resume", "new-session"]
+        );
+        assert_eq!(plan.argv.iter().filter(|a| *a == "resume").count(), 1);
+    }
+
+    #[test]
+    fn launch_argv_strips_session_selector_for_session_agents() {
+        let launch = vec![
+            "kimi".to_string(),
+            "--session".to_string(),
+            "old".to_string(),
+        ];
+        assert_eq!(
+            plan_with_launch_argv(
+                "herdr:kimi",
+                "kimi",
+                &AgentSessionRef::id("new").unwrap(),
+                Some(&launch),
+            )
+            .unwrap()
+            .argv,
+            vec!["kimi", "--session", "new"]
+        );
+    }
+
+    #[test]
+    fn launch_argv_without_selectors_is_replayed_verbatim() {
+        let launch = vec![
+            "claude".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+            "--model".to_string(),
+            "opus".to_string(),
+        ];
+        assert_eq!(
+            plan_with_launch_argv(
+                "herdr:claude",
+                "claude",
+                &AgentSessionRef::id("s").unwrap(),
+                Some(&launch),
+            )
+            .unwrap()
+            .argv,
+            vec![
+                "claude",
+                "--dangerously-skip-permissions",
+                "--model",
+                "opus",
+                "--resume",
+                "s",
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_argv_is_ignored_for_unsupported_sources() {
+        let launch = vec!["claude".to_string(), "--foo".to_string()];
+        assert!(plan_with_launch_argv(
+            "custom:claude",
+            "claude",
+            &AgentSessionRef::id("session").unwrap(),
+            Some(&launch),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn launch_argv_recorded_for_a_different_agent_is_ignored() {
+        // A terminal reused across agents keeps the first agent's launch_argv
+        // (`set_launch_argv_if_empty` never clears it): claude ran first and
+        // recorded its command, then codex was started in the same pane, so the
+        // pane's persisted session becomes codex's while launch_argv still holds
+        // claude's command. Replaying it would relaunch the wrong binary and
+        // resume claude's session id (`--resume claude-session`, which codex's
+        // selector rules cannot strip) instead of codex's. Fall back to the
+        // canonical codex resume.
+        let stale_claude_launch = vec![
+            "claude".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+            "--resume".to_string(),
+            "claude-session".to_string(),
+        ];
+        let plan = plan_with_launch_argv(
+            "herdr:codex",
+            "codex",
+            &AgentSessionRef::id("codex-session").unwrap(),
+            Some(&stale_claude_launch),
+        )
+        .unwrap();
+        assert_eq!(plan.argv, vec!["codex", "resume", "codex-session"]);
+        // The foreign agent's session id must never leak into the replayed
+        // command.
+        assert!(!plan.argv.iter().any(|arg| arg == "claude-session"));
+    }
+
+    #[test]
+    fn launch_argv_is_replayed_when_binary_name_differs_from_agent_label() {
+        // cursor's binary basename is `cursor-agent` while its agent label is
+        // `cursor`; the guard must still recognise the command as cursor's own
+        // and replay it rather than dropping the recorded flags.
+        let launch = vec!["cursor-agent".to_string(), "--force".to_string()];
+        let plan = plan_with_launch_argv(
+            "herdr:cursor",
+            "cursor",
+            &AgentSessionRef::id("cursor-session").unwrap(),
+            Some(&launch),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.argv,
+            vec!["cursor-agent", "--force", "--resume", "cursor-session"]
+        );
+    }
+
+    #[test]
+    fn launch_argv_for_a_wrapped_invocation_is_ignored() {
+        // A wrapper command (`node /path/cli.js`) is never captured for resume,
+        // and if one reaches the planner it must not be replayed with resume
+        // args appended — fall back to the canonical program.
+        let wrapped = vec![
+            "node".to_string(),
+            "/path/to/bin/codex".to_string(),
+            "--resume".to_string(),
+            "wrapped-session".to_string(),
+        ];
+        let plan = plan_with_launch_argv(
+            "herdr:codex",
+            "codex",
+            &AgentSessionRef::id("codex-session").unwrap(),
+            Some(&wrapped),
+        )
+        .unwrap();
+        assert_eq!(plan.argv, vec!["codex", "resume", "codex-session"]);
     }
 
     #[test]
