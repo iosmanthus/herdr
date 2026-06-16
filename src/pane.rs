@@ -492,6 +492,24 @@ struct ProcessProbeResult {
     foreground_is_pane_shell: bool,
     agent: Option<Agent>,
     process_name: Option<String>,
+    /// Command line to record for resume when the agent was invoked directly
+    /// (user typed `claude --flag` in a shell). `None` for wrapped invocations.
+    agent_argv: Option<Vec<String>>,
+}
+
+/// First directly-invoked instance of `agent` in the job, reduced to a launch
+/// command we can replay on resume. `None` when the agent is only reachable
+/// through a wrapper (e.g. `node /path/cli.js`).
+fn detected_agent_launch_argv(
+    agent: Agent,
+    job: &crate::platform::ForegroundJob,
+) -> Option<Vec<String>> {
+    job.processes.iter().find_map(|process| {
+        process
+            .argv
+            .as_deref()
+            .and_then(|argv| crate::detect::direct_launch_argv(agent, argv))
+    })
 }
 
 fn agent_hint_for_foreground_job_members(
@@ -537,6 +555,7 @@ fn process_probe_result(
         foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
         agent: Some(agent),
         process_name: Some(process_name),
+        agent_argv: detected_agent_launch_argv(agent, job),
     }
 }
 
@@ -597,7 +616,12 @@ fn probe_foreground_process_from_jobs(
             process_group_id: Some(job.process_group_id),
             foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
             agent: identified.as_ref().map(|(agent, _)| *agent),
-            process_name: identified.map(|(_, process_name)| process_name),
+            process_name: identified
+                .as_ref()
+                .map(|(_, process_name)| process_name.clone()),
+            agent_argv: identified
+                .as_ref()
+                .and_then(|(agent, _)| detected_agent_launch_argv(*agent, job)),
         };
     }
 
@@ -606,6 +630,7 @@ fn probe_foreground_process_from_jobs(
         foreground_is_pane_shell: false,
         agent: None,
         process_name: None,
+        agent_argv: None,
     }
 }
 
@@ -733,6 +758,7 @@ fn spawn_basic_detection_task(
                 let tracked_process_group_id =
                     process_group_for_change_tracking(foreground_pgid, process_group_id);
                 let foreground_is_pane_shell = probe.foreground_is_pane_shell;
+                let agent_launch_argv = probe.agent_argv;
                 let mut new_agent = probe.agent;
                 if let Some(suppressed_agent) = suppressed_agent {
                     if new_agent == Some(suppressed_agent) {
@@ -795,6 +821,11 @@ fn spawn_basic_detection_task(
                                 now,
                             )
                             .await;
+                            if let Some(argv) = agent_launch_argv.clone() {
+                                let _ = state_events
+                                    .send(AppEvent::AgentLaunchArgvDetected { pane_id, argv })
+                                    .await;
+                            }
                         } else {
                             agent_startup_grace_until = None;
                         }
@@ -2207,6 +2238,7 @@ impl PaneRuntime {
                                 process_group_id,
                             );
                             let foreground_is_pane_shell = probe.foreground_is_pane_shell;
+                            let agent_launch_argv = probe.agent_argv;
                             let mut new_agent = probe.agent;
 
                             if let Some(suppressed_agent) = suppressed_agent {
@@ -2275,6 +2307,14 @@ impl PaneRuntime {
                                             now,
                                         )
                                         .await;
+                                        if let Some(argv) = agent_launch_argv.clone() {
+                                            let _ = state_events
+                                                .send(AppEvent::AgentLaunchArgvDetected {
+                                                    pane_id,
+                                                    argv,
+                                                })
+                                                .await;
+                                        }
                                     } else {
                                         agent_startup_grace_until = None;
                                     }
