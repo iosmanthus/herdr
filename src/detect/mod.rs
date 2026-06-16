@@ -504,6 +504,28 @@ fn argv0_agent_name(argv: Option<&[String]>) -> Option<String> {
     agent_name_from_path_token(argv?.first()?)
 }
 
+/// When `argv` is a *direct* invocation of `agent` (argv0's basename resolves to
+/// that agent), return the command to record so the agent can later be resumed
+/// with the same flags: argv0 reduced to its basename — so resume runs through
+/// `$PATH` rather than a volatile absolute/store path — followed by the original
+/// arguments.
+///
+/// Returns `None` for wrapped invocations (e.g. `node /path/cli.js`), where the
+/// agent name comes from a later argument and replaying argv verbatim would be
+/// wrong, or when argv0 resolves to a different agent.
+pub fn direct_launch_argv(agent: Agent, argv: &[String]) -> Option<Vec<String>> {
+    let program = argv.first()?;
+    if agent_name_from_path_token(program).and_then(|name| parse_agent_label(&name)) != Some(agent)
+    {
+        return None;
+    }
+    let trimmed = program.trim_matches(|c| matches!(c, '"' | '\''));
+    let mut recorded = Vec::with_capacity(argv.len());
+    recorded.push(path_basename(trimmed).to_string());
+    recorded.extend(argv.iter().skip(1).cloned());
+    Some(recorded)
+}
+
 fn cmdline_argv0_agent_name(cmdline: &str) -> Option<String> {
     agent_name_from_path_token(cmdline.split_whitespace().next()?)
 }
@@ -1115,6 +1137,51 @@ mod tests {
     #[test]
     fn cmdline_argv0_agent_name_requires_exact_agent_basename() {
         assert_eq!(cmdline_argv0_agent_name("/tmp/my-codex-helper"), None);
+    }
+
+    #[test]
+    fn direct_launch_argv_records_basename_and_flags() {
+        let argv = vec![
+            "/nix/store/abc/bin/claude".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+            "--model".to_string(),
+            "opus".to_string(),
+        ];
+        assert_eq!(
+            direct_launch_argv(Agent::Claude, &argv),
+            Some(vec![
+                "claude".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+                "--model".to_string(),
+                "opus".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn direct_launch_argv_bare_program_has_no_flags() {
+        assert_eq!(
+            direct_launch_argv(Agent::Claude, &["claude".to_string()]),
+            Some(vec!["claude".to_string()])
+        );
+    }
+
+    #[test]
+    fn direct_launch_argv_skips_wrapped_invocations() {
+        // The runtime, not the agent binary, is argv0.
+        let argv = vec!["node".to_string(), "/path/to/bin/codex".to_string()];
+        assert_eq!(direct_launch_argv(Agent::Codex, &argv), None);
+    }
+
+    #[test]
+    fn direct_launch_argv_skips_when_argv0_is_a_different_agent() {
+        let argv = vec!["/usr/bin/claude".to_string(), "--foo".to_string()];
+        assert_eq!(direct_launch_argv(Agent::Codex, &argv), None);
+    }
+
+    #[test]
+    fn direct_launch_argv_skips_empty_argv() {
+        assert_eq!(direct_launch_argv(Agent::Claude, &[]), None);
     }
 
     #[cfg(unix)]

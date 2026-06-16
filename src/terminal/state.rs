@@ -186,6 +186,19 @@ impl TerminalState {
         self
     }
 
+    /// Record a launch command observed for an agent the user started by hand
+    /// (typed into a shell), so it can be replayed on resume. Only fills an
+    /// empty slot: a command herdr spawned this terminal with, or one already
+    /// captured, takes precedence and is never overwritten. Returns whether the
+    /// value changed.
+    pub fn set_launch_argv_if_empty(&mut self, argv: Vec<String>) -> bool {
+        if self.launch_argv.is_some() || argv.is_empty() {
+            return false;
+        }
+        self.launch_argv = Some(argv);
+        true
+    }
+
     pub fn with_respawn_shell_on_exit(mut self) -> Self {
         self.respawn_shell_on_exit = true;
         self
@@ -1721,6 +1734,30 @@ mod tests {
         assert!(timed_out.reconcile_managed_agent_at(now + Duration::from_millis(20), false));
         assert_eq!(timed_out.agent_name, None);
         assert_eq!(timed_out.managed_agent_kind(), None);
+    }
+
+    #[test]
+    fn set_launch_argv_if_empty_fills_only_empty_slot() {
+        let mut terminal = test_terminal();
+        assert_eq!(terminal.launch_argv, None);
+
+        let captured = vec![
+            "claude".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+        ];
+        assert!(terminal.set_launch_argv_if_empty(captured.clone()));
+        assert_eq!(terminal.launch_argv.as_deref(), Some(captured.as_slice()));
+
+        // A captured command never overwrites an existing one.
+        assert!(
+            !terminal.set_launch_argv_if_empty(vec!["claude".to_string(), "--other".to_string()])
+        );
+        assert_eq!(terminal.launch_argv.as_deref(), Some(captured.as_slice()));
+
+        // Empty argv is ignored even when the slot is empty.
+        let mut fresh = test_terminal();
+        assert!(!fresh.set_launch_argv_if_empty(Vec::new()));
+        assert_eq!(fresh.launch_argv, None);
     }
 
     #[test]
