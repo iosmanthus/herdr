@@ -37,6 +37,9 @@ pub enum AppEvent {
         process_exited: bool,
         observed_at: Instant,
     },
+    /// The command line of a directly-invoked agent was observed in a pane, so
+    /// it can be recorded for resume. Emitted once when the agent first appears.
+    AgentLaunchArgvDetected { pane_id: PaneId, argv: Vec<String> },
     /// Hook-authoritative agent state was reported for a pane.
     HookStateReported {
         pane_id: PaneId,

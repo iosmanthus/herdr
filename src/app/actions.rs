@@ -2494,6 +2494,21 @@ impl AppState {
                 }
                 Vec::new()
             }
+            AppEvent::AgentLaunchArgvDetected { pane_id, argv } => {
+                let Some(terminal_id) = self.workspaces.iter().find_map(|ws| {
+                    ws.pane_state(pane_id)
+                        .map(|pane| pane.attached_terminal_id.clone())
+                }) else {
+                    return Vec::new();
+                };
+                let Some(terminal) = self.terminals.get_mut(&terminal_id) else {
+                    return Vec::new();
+                };
+                if terminal.set_launch_argv_if_empty(argv) {
+                    self.mark_session_dirty();
+                }
+                Vec::new()
+            }
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
@@ -4536,6 +4551,55 @@ mod tests {
         assert_eq!(state.terminals.get(&terminal_id).unwrap().cwd, cwd);
         assert!(state.session_dirty);
         let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn agent_launch_argv_detected_records_launch_argv_once() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        state.session_dirty = false;
+
+        let argv = vec![
+            "claude".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+        ];
+        let updates = state.handle_app_event(AppEvent::AgentLaunchArgvDetected {
+            pane_id,
+            argv: argv.clone(),
+        });
+        assert!(updates.is_empty());
+        assert_eq!(
+            state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .launch_argv
+                .as_deref(),
+            Some(argv.as_slice())
+        );
+        assert!(state.session_dirty);
+
+        // A later detection neither overwrites nor re-dirties the session.
+        state.session_dirty = false;
+        state.handle_app_event(AppEvent::AgentLaunchArgvDetected {
+            pane_id,
+            argv: vec!["claude".to_string(), "--other".to_string()],
+        });
+        assert_eq!(
+            state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .launch_argv
+                .as_deref(),
+            Some(argv.as_slice())
+        );
+        assert!(!state.session_dirty);
     }
 
     #[test]
