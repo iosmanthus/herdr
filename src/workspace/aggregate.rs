@@ -17,6 +17,7 @@ pub struct PaneDetail {
     pub agent: Option<Agent>,
     pub state: AgentState,
     pub seen: bool,
+    pub last_agent_state_change_seq: Option<u64>,
     pub custom_status: Option<String>,
     pub state_labels: HashMap<String, String>,
 }
@@ -30,7 +31,12 @@ impl Tab {
         })
     }
 
-    pub fn pane_details(&self, terminals: &HashMap<TerminalId, TerminalState>) -> Vec<PaneDetail> {
+    fn pane_details(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        tab_idx: usize,
+        tab_label: &str,
+    ) -> Vec<PaneDetail> {
         self.layout
             .pane_ids()
             .iter()
@@ -48,13 +54,14 @@ impl Tab {
                 let presentation = terminal.effective_presentation();
                 Some(PaneDetail {
                     pane_id: *id,
-                    tab_idx: self.number.saturating_sub(1),
-                    tab_label: self.display_name(),
+                    tab_idx,
+                    tab_label: tab_label.to_string(),
                     label: agent_label.clone(),
                     agent_label,
                     agent: terminal.effective_known_agent(),
                     state: terminal.state,
                     seen: pane.seen,
+                    last_agent_state_change_seq: terminal.last_agent_state_change_seq,
                     custom_status: presentation.custom_status,
                     state_labels: presentation.state_labels,
                 })
@@ -98,7 +105,13 @@ impl Workspace {
         let multi_tab = self.tabs.len() > 1;
         self.tabs
             .iter()
-            .flat_map(|tab| tab.pane_details(terminals))
+            .enumerate()
+            .flat_map(|(tab_idx, tab)| {
+                let tab_label = self
+                    .tab_display_name(tab_idx)
+                    .unwrap_or_else(|| (tab_idx + 1).to_string());
+                tab.pane_details(terminals, tab_idx, &tab_label).into_iter()
+            })
             .map(|mut detail| {
                 if multi_tab {
                     detail.label = format!("{}·{}", detail.tab_label, detail.agent_label);
@@ -244,5 +257,28 @@ mod tests {
                 ("review·claude".into(), "claude".into(), Some(Agent::Claude)),
             ]
         );
+    }
+
+    #[test]
+    fn pane_details_use_tab_vector_index_not_stable_public_tab_number() {
+        let mut ws = Workspace::test_new("test");
+        let removed_tab = ws.test_add_tab(Some("removed"));
+        let survivor_tab = ws.test_add_tab(Some("survivor"));
+        let survivor_pane = ws.tabs[survivor_tab].root_pane;
+        assert!(ws.close_tab(removed_tab));
+
+        let mut terminals = HashMap::new();
+        let mut terminal = terminal_for_pane(&ws, survivor_pane);
+        terminal.detected_agent = Some(Agent::Codex);
+        terminals.insert(terminal.id.clone(), terminal);
+
+        let details = ws.pane_details(&terminals);
+        let survivor = details
+            .iter()
+            .find(|detail| detail.pane_id == survivor_pane)
+            .expect("surviving tab agent should be listed");
+
+        assert_eq!(ws.tabs[1].number, 3);
+        assert_eq!(survivor.tab_idx, 1);
     }
 }

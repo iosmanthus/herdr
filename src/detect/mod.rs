@@ -46,8 +46,10 @@ pub enum Agent {
     Codex,
     Gemini,
     Cursor,
+    Devin,
     Antigravity,
     Cline,
+    Omp,
     OpenCode,
     GithubCopilot,
     Kimi,
@@ -61,12 +63,13 @@ pub enum Agent {
 }
 
 impl Agent {
-    pub const ALL: [Self; 17] = [
+    pub const SCREEN_MANIFEST_AGENTS: [Self; 18] = [
         Self::Pi,
         Self::Claude,
         Self::Codex,
         Self::Gemini,
         Self::Cursor,
+        Self::Devin,
         Self::Antigravity,
         Self::Cline,
         Self::OpenCode,
@@ -89,8 +92,10 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Codex => "codex",
         Agent::Gemini => "gemini",
         Agent::Cursor => "cursor",
+        Agent::Devin => "devin",
         Agent::Antigravity => "agy",
         Agent::Cline => "cline",
+        Agent::Omp => "omp",
         Agent::OpenCode => "opencode",
         Agent::GithubCopilot => "copilot",
         Agent::Kimi => "kimi",
@@ -112,8 +117,10 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
         "cursor" | "cursor-agent" => Some(Agent::Cursor),
+        "devin" | "devin-cli" | "devin cli" => Some(Agent::Devin),
         "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
         "cline" => Some(Agent::Cline),
+        "omp" => Some(Agent::Omp),
         "opencode" | "open-code" => Some(Agent::OpenCode),
         "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
         "kimi" | "kimi-code" | "kimi code" => Some(Agent::Kimi),
@@ -139,8 +146,10 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
         "cursor" | "cursor-agent" => Some(Agent::Cursor),
+        "devin" | "devin-cli" | "devin cli" => Some(Agent::Devin),
         "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
         "cline" => Some(Agent::Cline),
+        "omp" => Some(Agent::Omp),
         "opencode" | "open-code" => Some(Agent::OpenCode),
         "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
         "kimi" | "kimi-code" | "kimi code" => Some(Agent::Kimi),
@@ -604,9 +613,12 @@ mod tests {
         assert_eq!(identify_agent("gemini"), Some(Agent::Gemini));
         assert_eq!(identify_agent("cursor"), Some(Agent::Cursor));
         assert_eq!(identify_agent("cursor-agent"), Some(Agent::Cursor));
+        assert_eq!(identify_agent("devin"), Some(Agent::Devin));
+        assert_eq!(identify_agent("devin-cli"), Some(Agent::Devin));
         assert_eq!(identify_agent("agy"), Some(Agent::Antigravity));
         assert_eq!(identify_agent("antigravity-cli"), Some(Agent::Antigravity));
         assert_eq!(identify_agent("cline"), Some(Agent::Cline));
+        assert_eq!(identify_agent("omp"), Some(Agent::Omp));
         assert_eq!(identify_agent("opencode"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("opencode.exe"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("kimi"), Some(Agent::Kimi));
@@ -628,8 +640,10 @@ mod tests {
         assert_eq!(parse_agent_label("pi"), Some(Agent::Pi));
         assert_eq!(parse_agent_label("claude"), Some(Agent::Claude));
         assert_eq!(parse_agent_label("cursor-agent"), Some(Agent::Cursor));
+        assert_eq!(parse_agent_label("devin-cli"), Some(Agent::Devin));
         assert_eq!(parse_agent_label("agy"), Some(Agent::Antigravity));
         assert_eq!(parse_agent_label("antigravity"), Some(Agent::Antigravity));
+        assert_eq!(parse_agent_label("omp"), Some(Agent::Omp));
         assert_eq!(parse_agent_label("opencode.exe"), Some(Agent::OpenCode));
         assert_eq!(parse_agent_label("copilot"), Some(Agent::GithubCopilot));
         assert_eq!(parse_agent_label("kimi-code"), Some(Agent::Kimi));
@@ -649,7 +663,9 @@ mod tests {
         assert_eq!(agent_label(Agent::Pi), "pi");
         assert_eq!(agent_label(Agent::GithubCopilot), "copilot");
         assert_eq!(agent_label(Agent::OpenCode), "opencode");
+        assert_eq!(agent_label(Agent::Devin), "devin");
         assert_eq!(agent_label(Agent::Antigravity), "agy");
+        assert_eq!(agent_label(Agent::Omp), "omp");
         assert_eq!(agent_label(Agent::Kiro), "kiro");
         assert_eq!(agent_label(Agent::Grok), "grok");
         assert_eq!(agent_label(Agent::Hermes), "hermes");
@@ -669,6 +685,7 @@ mod tests {
         assert_eq!(identify_agent("Pi"), Some(Agent::Pi));
         assert_eq!(identify_agent("CLAUDE"), Some(Agent::Claude));
         assert_eq!(identify_agent("Codex"), Some(Agent::Codex));
+        assert_eq!(identify_agent("Devin"), Some(Agent::Devin));
     }
 
     #[test]
@@ -767,6 +784,23 @@ mod tests {
         assert_eq!(
             identify_agent_in_job(&job),
             Some((Agent::Pi, "pi".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_bun_wrapped_omp() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                123,
+                "bun",
+                &["bun", "/home/can/.bun/bin/omp"],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Omp, "omp".to_string()))
         );
     }
 

@@ -124,6 +124,26 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
+/// Read a Herdr agent identity hint from a process environment.
+pub fn process_agent_hint(pid: u32) -> Option<crate::detect::Agent> {
+    if pid == 0 {
+        return None;
+    }
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    parse_agent_env_hint(&environ)
+}
+
+fn parse_agent_env_hint(environ: &[u8]) -> Option<crate::detect::Agent> {
+    for record in environ.split(|&byte| byte == 0) {
+        let Some(value) = record.strip_prefix(b"HERDR_AGENT=") else {
+            continue;
+        };
+        let value = std::str::from_utf8(value).ok()?;
+        return crate::detect::parse_agent_label(value);
+    }
+    None
+}
+
 pub fn session_processes(child_pid: u32) -> Vec<u32> {
     let Some(session_id) = process_session_id(child_pid) else {
         return Vec::new();
@@ -817,6 +837,24 @@ mod tests {
     fn switch_is_noop_when_backend_query_unavailable() {
         let undo = plan_ascii_switch(ImeBackend::Fcitx5, &mut |_, _| None);
         assert_eq!(undo, None);
+    }
+
+    #[test]
+    fn parse_agent_env_hint_accepts_known_agents() {
+        assert_eq!(
+            parse_agent_env_hint(b"PATH=/bin\0HERDR_AGENT=claude\0TERM=xterm\0"),
+            Some(crate::detect::Agent::Claude)
+        );
+        assert_eq!(
+            parse_agent_env_hint(b"HERDR_AGENT=codex"),
+            Some(crate::detect::Agent::Codex)
+        );
+    }
+
+    #[test]
+    fn parse_agent_env_hint_ignores_missing_or_unknown_agents() {
+        assert_eq!(parse_agent_env_hint(b"PATH=/bin\0TERM=xterm\0"), None);
+        assert_eq!(parse_agent_env_hint(b"HERDR_AGENT=not-an-agent\0"), None);
     }
 
     #[test]

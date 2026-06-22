@@ -30,14 +30,17 @@ impl UpdateChannelConfig {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
 pub struct UpdateConfig {
-    #[serde(default = "default_update_channel")]
     pub channel: UpdateChannelConfig,
+    pub version_check: bool,
+    pub manifest_check: bool,
 }
 
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
             channel: default_update_channel(),
+            version_check: true,
+            manifest_check: true,
         }
     }
 }
@@ -84,17 +87,18 @@ pub enum ToastClipboardPosition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum AgentPanelScopeConfig {
-    Current,
+pub enum AgentPanelSortConfig {
     #[default]
-    All,
+    #[serde(alias = "workspaces")]
+    Spaces,
+    Priority,
 }
 
-impl AgentPanelScopeConfig {
+impl AgentPanelSortConfig {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Current => "current",
-            Self::All => "all",
+            Self::Spaces => "spaces",
+            Self::Priority => "priority",
         }
     }
 }
@@ -378,6 +382,8 @@ pub struct KeysConfig {
     pub next_agent: BindingConfig,
     /// Focus an agent by index 1-9. Unset by default.
     pub focus_agent: BindingConfig,
+    /// Local-client shortcut that sends a clipboard image to a remote Herdr session. Default: "ctrl+v".
+    pub remote_image_paste: String,
     /// Create a new tab in the active workspace. Default: "prefix+c"
     pub new_tab: BindingConfig,
     /// Rename the active tab. Default: "prefix+shift+t".
@@ -458,19 +464,6 @@ pub struct WorktreesConfig {
     pub directory: String,
 }
 
-/// How borders are drawn between tiled panes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PaneBorderConfig {
-    /// Each pane draws its own full border (upstream default). Adjacent panes
-    /// show two lines unless separated by `pane_gap`.
-    #[default]
-    PerPane,
-    /// Adjacent panes share a single divider line (tmux-style). `pane_gap` is
-    /// ignored in this mode.
-    Shared,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -481,13 +474,6 @@ pub struct UiConfig {
     pub sidebar_max_width: u16,
     /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
     pub mobile_width_threshold: u16,
-    /// Blank cells between adjacent panes when `pane_border = "per_pane"`.
-    /// Ignored when `pane_border = "shared"`. Default: 0.
-    pub pane_gap: u16,
-    /// How borders between panes are drawn: `"per_pane"` (each pane its own
-    /// border; the upstream default) or `"shared"` (a single tmux-style divider
-    /// line shared by adjacent panes). Default: per_pane.
-    pub pane_border: PaneBorderConfig,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
     /// Modifier that lets right-click gestures pass through to pane apps. Empty disables it.
@@ -500,10 +486,14 @@ pub struct UiConfig {
     pub confirm_close: bool,
     /// Ask for a tab name before creating a new tab. Default: true.
     pub prompt_new_tab_name: bool,
+    /// Draw borders around split panes. Default: true.
+    pub pane_borders: bool,
+    /// Keep split panes visually separated instead of sharing divider borders. Default: true.
+    pub pane_gaps: bool,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
-    /// Agent sidebar scope. Saved values are "current" or "all". Default: "all".
-    pub agent_panel_scope: AgentPanelScopeConfig,
+    /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
+    pub agent_panel_sort: AgentPanelSortConfig,
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
@@ -589,8 +579,9 @@ pub struct ExperimentalConfig {
     /// detected agent matches one of these names (case-insensitive). Empty
     /// list means apply to any focused pane. Unknown agent names are ignored;
     /// if the list contains no valid names, the reveal does not apply.
-    /// Accepted names: pi, claude, codex, gemini, cursor, cline, opencode,
-    /// copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder.
+    /// Accepted names: pi, claude, codex, gemini, cursor, devin, cline,
+    /// opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo,
+    /// qodercli, qoder.
     /// Default: empty.
     pub cjk_ime_agents: Vec<String>,
     /// Cursor shape rendered for the IME anchor when
@@ -633,6 +624,7 @@ impl Default for KeysConfig {
             previous_agent: BindingConfig::empty(),
             next_agent: BindingConfig::empty(),
             focus_agent: BindingConfig::empty(),
+            remote_image_paste: "ctrl+v".into(),
             new_tab: BindingConfig::one("prefix+c"),
             rename_tab: BindingConfig::one("prefix+shift+t"),
             previous_tab: BindingConfig::one("prefix+p"),
@@ -681,16 +673,16 @@ impl Default for UiConfig {
             sidebar_min_width: 18,
             sidebar_max_width: 36,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
-            pane_gap: 0,
-            pane_border: PaneBorderConfig::PerPane,
             mouse_capture: true,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
             mouse_scroll_lines: None,
             confirm_close: true,
             prompt_new_tab_name: true,
+            pane_borders: true,
+            pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
-            agent_panel_scope: AgentPanelScopeConfig::All,
+            agent_panel_sort: AgentPanelSortConfig::Spaces,
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
@@ -699,10 +691,6 @@ impl Default for UiConfig {
 }
 
 impl UiConfig {
-    pub fn pane_border_shared(&self) -> bool {
-        matches!(self.pane_border, PaneBorderConfig::Shared)
-    }
-
     pub fn mouse_scroll_lines(&self) -> usize {
         self.mouse_scroll_lines
             .map(NonZeroUsize::get)
@@ -792,17 +780,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn update_channel_defaults_for_platform_and_parses() {
+    fn update_config_defaults_and_parses() {
         let default_config = Config::default();
         assert_eq!(default_config.update.channel, default_update_channel());
+        assert!(default_config.update.version_check);
+        assert!(default_config.update.manifest_check);
 
         let toml = r#"
 [update]
 channel = "preview"
+version_check = false
+manifest_check = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.update.channel, UpdateChannelConfig::Preview);
         assert_eq!(config.update.channel.as_str(), "preview");
+        assert!(!config.update.version_check);
+        assert!(!config.update.manifest_check);
     }
 
     #[test]
@@ -883,54 +877,51 @@ resume_agents_on_restore = false
     }
 
     #[test]
-    fn agent_panel_scope_config_parses() {
+    fn agent_panel_sort_config_parses_alias_and_defaults() {
+        assert_eq!(
+            Config::default().ui.agent_panel_sort,
+            AgentPanelSortConfig::Spaces
+        );
+
         let toml = r#"
 [ui]
-agent_panel_scope = "all"
+agent_panel_sort = "priority"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.ui.agent_panel_scope, AgentPanelScopeConfig::All);
+        assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Priority);
+
+        let toml = r#"
+[ui]
+agent_panel_sort = "workspaces"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Spaces);
+
+        let toml = r#"
+[ui]
+agent_panel_scope = "current"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Spaces);
     }
 
     #[test]
-    fn pane_border_agent_labels_default_off_and_parse() {
+    fn pane_appearance_defaults_and_parse() {
         let default_config = Config::default();
+        assert!(default_config.ui.pane_borders);
+        assert!(default_config.ui.pane_gaps);
         assert!(!default_config.ui.show_agent_labels_on_pane_borders);
 
         let toml = r#"
 [ui]
+pane_borders = false
+pane_gaps = true
 show_agent_labels_on_pane_borders = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.ui.pane_borders);
+        assert!(config.ui.pane_gaps);
         assert!(config.ui.show_agent_labels_on_pane_borders);
-    }
-
-    #[test]
-    fn pane_gap_defaults_to_zero_and_parses() {
-        let default_config = Config::default();
-        assert_eq!(default_config.ui.pane_gap, 0);
-
-        let toml = r#"
-[ui]
-pane_gap = 2
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.ui.pane_gap, 2);
-    }
-
-    #[test]
-    fn pane_border_defaults_to_per_pane_and_parses() {
-        let default_config = Config::default();
-        assert_eq!(default_config.ui.pane_border, PaneBorderConfig::PerPane);
-        assert!(!default_config.ui.pane_border_shared());
-
-        let toml = r#"
-[ui]
-pane_border = "shared"
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.ui.pane_border, PaneBorderConfig::Shared);
-        assert!(config.ui.pane_border_shared());
     }
 
     #[test]

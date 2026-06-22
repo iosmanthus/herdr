@@ -2,7 +2,10 @@
 
 use std::cmp::Reverse;
 
-use ratatui::layout::{Direction, Rect};
+use ratatui::{
+    layout::{Direction, Rect},
+    widgets::Borders,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PaneId(u32);
@@ -37,6 +40,8 @@ pub struct PaneInfo {
     /// Visible scrollbar lane, when scrollback is present. `inner_rect` may still
     /// exclude a stable hidden gutter when this is `None`.
     pub scrollbar_rect: Option<Rect>,
+    /// Borders drawn around this pane after UI chrome is applied.
+    pub borders: Borders,
     pub is_focused: bool,
 }
 
@@ -105,26 +110,15 @@ impl TileLayout {
 
     /// Compute rects for all panes given the available area.
     pub fn panes(&self, area: Rect) -> Vec<PaneInfo> {
-        self.panes_with_gap(area, 0)
-    }
-
-    /// Compute pane rects, leaving `gap` blank cells between adjacent panes.
-    /// `gap == 0` produces touching rects (identical to [`panes`]).
-    pub fn panes_with_gap(&self, area: Rect, gap: u16) -> Vec<PaneInfo> {
         let mut result = Vec::new();
-        collect_panes(&self.root, area, self.focus, gap, &mut result);
+        collect_panes(&self.root, area, self.focus, &mut result);
         result
     }
 
     /// Collect all split boundaries for mouse drag resize.
     pub fn splits(&self, area: Rect) -> Vec<SplitBorder> {
-        self.splits_with_gap(area, 0)
-    }
-
-    /// Collect split boundaries accounting for the inter-pane `gap`.
-    pub fn splits_with_gap(&self, area: Rect, gap: u16) -> Vec<SplitBorder> {
         let mut result = Vec::new();
-        collect_splits(&self.root, area, vec![], gap, &mut result);
+        collect_splits(&self.root, area, vec![], &mut result);
         result
     }
 
@@ -141,6 +135,30 @@ impl TileLayout {
         self.root = split_at(old, self.focus, direction, new_id, valid_split_ratio(ratio));
         self.focus = new_id;
         new_id
+    }
+
+    /// Insert an existing pane id next to a target pane without allocating a new
+    /// pane or spawning a terminal runtime.
+    pub fn insert_pane_near(
+        &mut self,
+        target: PaneId,
+        moved: PaneId,
+        direction: Direction,
+        ratio: f32,
+    ) -> bool {
+        if target == moved {
+            return false;
+        }
+        let ids = self.pane_ids();
+        if !ids.contains(&target) || ids.contains(&moved) {
+            return false;
+        }
+
+        let placeholder = PaneId::from_raw(0);
+        let old = std::mem::replace(&mut self.root, Node::Pane(placeholder));
+        self.root = split_at(old, target, direction, moved, valid_split_ratio(ratio));
+        self.focus = moved;
+        true
     }
 
     /// Close the focused pane. Returns false if it's the last pane.
@@ -194,13 +212,13 @@ impl TileLayout {
 
     /// Adjust the nearest split in the given direction for the focused pane.
     /// `delta` is positive to grow, negative to shrink.
-    pub fn resize_focused(&mut self, nav: NavDirection, delta: f32, area: Rect, gap: u16) {
-        let panes = self.panes_with_gap(area, gap);
+    pub fn resize_focused(&mut self, nav: NavDirection, delta: f32, area: Rect) {
+        let panes = self.panes(area);
         let Some(focused) = panes.iter().find(|p| p.is_focused) else {
             return;
         };
         let focused_rect = focused.rect;
-        let splits = self.splits_with_gap(area, gap);
+        let splits = self.splits(area);
 
         let target_dir = match nav {
             NavDirection::Left | NavDirection::Right => Direction::Horizontal,
@@ -208,12 +226,9 @@ impl TileLayout {
         };
         let grows = matches!(nav, NavDirection::Right | NavDirection::Down);
 
-        let best = splits
-            .iter()
-            .filter(|s| s.direction == target_dir)
-            .filter(|s| split_area_overlaps_focused_pane(s, focused_rect, nav))
-            .filter(|s| split_on_requested_edge(s, focused_rect, nav))
-            .min_by_key(|s| split_edge_distance(s, focused_rect, nav));
+        let best = nearest_resize_split(&splits, target_dir, focused_rect, nav).or_else(|| {
+            nearest_resize_split(&splits, target_dir, focused_rect, opposite_direction(nav))
+        });
 
         if let Some(split) = best {
             let path = split.path.clone();
@@ -229,7 +244,6 @@ impl TileLayout {
         nav: NavDirection,
         delta: f32,
         area: Rect,
-        gap: u16,
     ) -> bool {
         if !self.pane_ids().contains(&pane_id) {
             return false;
@@ -237,7 +251,7 @@ impl TileLayout {
         let before = split_ratios(&self.root);
         let previous_focus = self.focus;
         self.focus = pane_id;
-        self.resize_focused(nav, delta, area, gap);
+        self.resize_focused(nav, delta, area);
         self.focus = previous_focus;
         split_ratios(&self.root) != before
     }
@@ -339,6 +353,29 @@ fn split_area_overlaps_focused_pane(split: &SplitBorder, focused: Rect, nav: Nav
     }
 }
 
+fn nearest_resize_split(
+    splits: &[SplitBorder],
+    target_dir: Direction,
+    focused: Rect,
+    nav: NavDirection,
+) -> Option<&SplitBorder> {
+    splits
+        .iter()
+        .filter(|s| s.direction == target_dir)
+        .filter(|s| split_area_overlaps_focused_pane(s, focused, nav))
+        .filter(|s| split_on_requested_edge(s, focused, nav))
+        .min_by_key(|s| split_edge_distance(s, focused, nav))
+}
+
+fn opposite_direction(nav: NavDirection) -> NavDirection {
+    match nav {
+        NavDirection::Left => NavDirection::Right,
+        NavDirection::Right => NavDirection::Left,
+        NavDirection::Up => NavDirection::Down,
+        NavDirection::Down => NavDirection::Up,
+    }
+}
+
 fn split_edge_distance(split: &SplitBorder, focused: Rect, nav: NavDirection) -> u32 {
     match nav {
         NavDirection::Left => (split.pos as i32 - focused.x as i32).unsigned_abs(),
@@ -373,7 +410,7 @@ fn count_panes(node: &Node) -> usize {
     }
 }
 
-fn collect_panes(node: &Node, area: Rect, focus: PaneId, gap: u16, result: &mut Vec<PaneInfo>) {
+fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneInfo>) {
     match node {
         Node::Pane(id) => {
             result.push(PaneInfo {
@@ -382,6 +419,7 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, gap: u16, result: &mut 
                 // inner_rect is set during render when we know if borders are shown
                 inner_rect: area,
                 scrollbar_rect: None,
+                borders: Borders::NONE,
                 is_focused: *id == focus,
             });
         }
@@ -391,20 +429,14 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, gap: u16, result: &mut 
             first,
             second,
         } => {
-            let (a, b) = split_rect(area, *direction, *ratio, gap);
-            collect_panes(first, a, focus, gap, result);
-            collect_panes(second, b, focus, gap, result);
+            let (a, b) = split_rect(area, *direction, *ratio);
+            collect_panes(first, a, focus, result);
+            collect_panes(second, b, focus, result);
         }
     }
 }
 
-fn collect_splits(
-    node: &Node,
-    area: Rect,
-    path: Vec<bool>,
-    gap: u16,
-    result: &mut Vec<SplitBorder>,
-) {
+fn collect_splits(node: &Node, area: Rect, path: Vec<bool>, result: &mut Vec<SplitBorder>) {
     if let Node::Split {
         direction,
         ratio,
@@ -412,7 +444,7 @@ fn collect_splits(
         second,
     } = node
     {
-        let (a, b) = split_rect(area, *direction, *ratio, gap);
+        let (a, b) = split_rect(area, *direction, *ratio);
         let pos = match direction {
             Direction::Horizontal => a.x + a.width,
             Direction::Vertical => a.y + a.height,
@@ -426,10 +458,10 @@ fn collect_splits(
         });
         let mut lp = path.clone();
         lp.push(false);
-        collect_splits(first, a, lp, gap, result);
+        collect_splits(first, a, lp, result);
         let mut rp = path;
         rp.push(true);
-        collect_splits(second, b, rp, gap, result);
+        collect_splits(second, b, rp, result);
     }
 }
 
@@ -583,60 +615,24 @@ fn get_ratio_at(node: &Node, path: &[bool]) -> Option<f32> {
     }
 }
 
-/// Split `area` into two child rects. `gap` blank cells are left between them;
-/// `gap == 0` yields touching rects (the historical behaviour).
-fn split_rect(area: Rect, direction: Direction, ratio: f32, gap: u16) -> (Rect, Rect) {
+fn split_rect(area: Rect, direction: Direction, ratio: f32) -> (Rect, Rect) {
     match direction {
         Direction::Horizontal => {
             let first_w = ((area.width as f32) * ratio).round() as u16;
-            let second_x = area.x.saturating_add(first_w).saturating_add(gap);
-            let second_w = area.width.saturating_sub(first_w).saturating_sub(gap);
+            let second_w = area.width.saturating_sub(first_w);
             (
                 Rect::new(area.x, area.y, first_w, area.height),
-                Rect::new(second_x, area.y, second_w, area.height),
+                Rect::new(area.x + first_w, area.y, second_w, area.height),
             )
         }
         Direction::Vertical => {
             let first_h = ((area.height as f32) * ratio).round() as u16;
-            let second_y = area.y.saturating_add(first_h).saturating_add(gap);
-            let second_h = area.height.saturating_sub(first_h).saturating_sub(gap);
+            let second_h = area.height.saturating_sub(first_h);
             (
                 Rect::new(area.x, area.y, area.width, first_h),
-                Rect::new(area.x, second_y, area.width, second_h),
+                Rect::new(area.x, area.y + first_h, area.width, second_h),
             )
         }
-    }
-}
-
-#[cfg(test)]
-mod gap_tests {
-    use super::*;
-
-    #[test]
-    fn split_rect_gap_zero_is_touching() {
-        let area = Rect::new(0, 0, 100, 30);
-        let (a, b) = split_rect(area, Direction::Horizontal, 0.5, 0);
-        assert_eq!(a, Rect::new(0, 0, 50, 30));
-        assert_eq!(b, Rect::new(50, 0, 50, 30));
-        assert_eq!(a.x + a.width, b.x, "panes touch when gap == 0");
-    }
-
-    #[test]
-    fn split_rect_horizontal_gap_separates_panes() {
-        let area = Rect::new(0, 0, 100, 30);
-        let (a, b) = split_rect(area, Direction::Horizontal, 0.5, 2);
-        assert_eq!(a, Rect::new(0, 0, 50, 30));
-        assert_eq!(b, Rect::new(52, 0, 48, 30));
-        assert_eq!(b.x - (a.x + a.width), 2, "two blank cells between panes");
-    }
-
-    #[test]
-    fn split_rect_vertical_gap_separates_panes() {
-        let area = Rect::new(0, 0, 80, 24);
-        let (a, b) = split_rect(area, Direction::Vertical, 0.5, 1);
-        assert_eq!(a, Rect::new(0, 0, 80, 12));
-        assert_eq!(b, Rect::new(0, 13, 80, 11));
-        assert_eq!(b.y - (a.y + a.height), 1, "one blank row between panes");
     }
 }
 
@@ -676,6 +672,13 @@ mod tests {
             .into_iter()
             .map(|info| (info.id, info.rect))
             .collect()
+    }
+
+    fn pane_rect(layout: &TileLayout, pane_id: PaneId) -> Rect {
+        pane_rects(layout)
+            .into_iter()
+            .find_map(|(id, rect)| (id == pane_id).then_some(rect))
+            .expect("pane should exist")
     }
 
     fn split_snapshot(layout: &TileLayout) -> Vec<(Direction, f32)> {
@@ -736,6 +739,22 @@ mod tests {
     }
 
     #[test]
+    fn insert_existing_pane_near_target_preserves_existing_ids_and_focuses_moved_pane() {
+        let (mut layout, root) = TileLayout::new();
+        let moved = pane(99);
+
+        assert!(layout.insert_pane_near(root, moved, Direction::Horizontal, 0.25));
+
+        assert_eq!(layout.pane_count(), 2);
+        assert_eq!(layout.pane_ids(), vec![root, moved]);
+        assert_eq!(layout.focused(), moved);
+        let splits = split_snapshot(&layout);
+        assert_eq!(splits, vec![(Direction::Horizontal, 0.25)]);
+        assert_eq!(pane_rect(&layout, root), Rect::new(0, 0, 25, 40));
+        assert_eq!(pane_rect(&layout, moved), Rect::new(25, 0, 75, 40));
+    }
+
+    #[test]
     fn split_focused_with_ratio_sets_new_split_ratio() {
         let (mut layout, root) = TileLayout::new();
         layout.focus_pane(root);
@@ -753,13 +772,7 @@ mod tests {
         let mut layout = sample_layout();
         let original_focus = layout.focused();
 
-        assert!(layout.resize_pane(
-            pane(1),
-            NavDirection::Right,
-            0.05,
-            Rect::new(0, 0, 100, 40),
-            0
-        ));
+        assert!(layout.resize_pane(pane(1), NavDirection::Right, 0.05, Rect::new(0, 0, 100, 40),));
 
         assert_eq!(layout.focused(), original_focus);
         let split = split_snapshot(&layout)[0];
@@ -773,7 +786,7 @@ mod tests {
         let right = layout.split_focused(Direction::Horizontal);
         layout.focus_pane(root);
 
-        assert!(layout.resize_pane(right, NavDirection::Left, 0.05, Rect::new(0, 0, 100, 40), 0));
+        assert!(layout.resize_pane(right, NavDirection::Left, 0.05, Rect::new(0, 0, 100, 40),));
 
         let split = split_snapshot(&layout)[0];
         assert_eq!(split.0, Direction::Horizontal);
@@ -782,40 +795,96 @@ mod tests {
     }
 
     #[test]
-    fn resize_outer_edges_are_noops() {
+    fn resize_outer_edges_shrink_focused_pane() {
         let (mut horizontal, left) = TileLayout::new();
-        let right = horizontal.split_focused(Direction::Horizontal);
-        let horizontal_before = split_snapshot(&horizontal);
+        horizontal.split_focused(Direction::Horizontal);
 
-        assert!(!horizontal.resize_pane(
-            left,
-            NavDirection::Left,
-            0.05,
-            Rect::new(0, 0, 100, 40),
-            0
-        ));
-        assert!(!horizontal.resize_pane(
-            right,
-            NavDirection::Right,
-            0.05,
-            Rect::new(0, 0, 100, 40),
-            0,
-        ));
-        assert_eq!(split_snapshot(&horizontal), horizontal_before);
+        assert!(horizontal.resize_pane(left, NavDirection::Left, 0.05, Rect::new(0, 0, 100, 40),));
+        let split = split_snapshot(&horizontal)[0];
+        assert_eq!(split.0, Direction::Horizontal);
+        assert!((split.1 - 0.45).abs() < f32::EPSILON);
+
+        let (mut horizontal, _left) = TileLayout::new();
+        let right = horizontal.split_focused(Direction::Horizontal);
+
+        assert!(horizontal.resize_pane(right, NavDirection::Right, 0.05, Rect::new(0, 0, 100, 40),));
+        let split = split_snapshot(&horizontal)[0];
+        assert_eq!(split.0, Direction::Horizontal);
+        assert!((split.1 - 0.55).abs() < f32::EPSILON);
 
         let (mut vertical, top) = TileLayout::new();
-        let bottom = vertical.split_focused(Direction::Vertical);
-        let vertical_before = split_snapshot(&vertical);
+        vertical.split_focused(Direction::Vertical);
 
-        assert!(!vertical.resize_pane(top, NavDirection::Up, 0.05, Rect::new(0, 0, 100, 40), 0));
-        assert!(!vertical.resize_pane(
-            bottom,
-            NavDirection::Down,
-            0.05,
-            Rect::new(0, 0, 100, 40),
-            0
-        ));
-        assert_eq!(split_snapshot(&vertical), vertical_before);
+        assert!(vertical.resize_pane(top, NavDirection::Up, 0.05, Rect::new(0, 0, 100, 40),));
+        let split = split_snapshot(&vertical)[0];
+        assert_eq!(split.0, Direction::Vertical);
+        assert!((split.1 - 0.45).abs() < f32::EPSILON);
+
+        let (mut vertical, _top) = TileLayout::new();
+        let bottom = vertical.split_focused(Direction::Vertical);
+
+        assert!(vertical.resize_pane(bottom, NavDirection::Down, 0.05, Rect::new(0, 0, 100, 40),));
+        let split = split_snapshot(&vertical)[0];
+        assert_eq!(split.0, Direction::Vertical);
+        assert!((split.1 - 0.55).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn resize_outer_edge_falls_back_to_horizontal_ancestor_split() {
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.6,
+                first: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.5,
+                    first: Box::new(Node::Pane(pane(1))),
+                    second: Box::new(Node::Pane(pane(2))),
+                }),
+                second: Box::new(Node::Pane(pane(3))),
+            },
+            pane(1),
+        );
+        let before = pane_rect(&layout, pane(1));
+
+        assert!(layout.resize_pane(pane(1), NavDirection::Left, 0.05, Rect::new(0, 0, 100, 40),));
+
+        let after = pane_rect(&layout, pane(1));
+        assert_eq!(after.height, before.height);
+        assert!(after.width < before.width);
+        let splits = split_snapshot(&layout);
+        assert_eq!(splits[0].0, Direction::Horizontal);
+        assert!((splits[0].1 - 0.55).abs() < f32::EPSILON);
+        assert_eq!(splits[1], (Direction::Vertical, 0.5));
+    }
+
+    #[test]
+    fn resize_outer_edge_falls_back_to_vertical_ancestor_split() {
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Vertical,
+                ratio: 0.6,
+                first: Box::new(Node::Split {
+                    direction: Direction::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(Node::Pane(pane(1))),
+                    second: Box::new(Node::Pane(pane(2))),
+                }),
+                second: Box::new(Node::Pane(pane(3))),
+            },
+            pane(1),
+        );
+        let before = pane_rect(&layout, pane(1));
+
+        assert!(layout.resize_pane(pane(1), NavDirection::Up, 0.05, Rect::new(0, 0, 100, 40),));
+
+        let after = pane_rect(&layout, pane(1));
+        assert_eq!(after.width, before.width);
+        assert!(after.height < before.height);
+        let splits = split_snapshot(&layout);
+        assert_eq!(splits[0].0, Direction::Vertical);
+        assert!((splits[0].1 - 0.55).abs() < f32::EPSILON);
+        assert_eq!(splits[1], (Direction::Horizontal, 0.5));
     }
 
     #[test]
@@ -840,13 +909,7 @@ mod tests {
             pane(3),
         );
 
-        assert!(layout.resize_pane(
-            pane(3),
-            NavDirection::Right,
-            0.05,
-            Rect::new(0, 0, 100, 40),
-            0
-        ));
+        assert!(layout.resize_pane(pane(3), NavDirection::Right, 0.05, Rect::new(0, 0, 100, 40),));
 
         let splits = split_snapshot(&layout);
         assert_eq!(splits[0], (Direction::Vertical, 0.5));
@@ -862,6 +925,7 @@ mod tests {
             rect: Rect::new(10, 10, 10, 10),
             inner_rect: Rect::new(10, 10, 10, 10),
             scrollbar_rect: None,
+            borders: Borders::NONE,
             is_focused: true,
         };
         let small_overlap_first = PaneInfo {
@@ -869,6 +933,7 @@ mod tests {
             rect: Rect::new(0, 10, 10, 2),
             inner_rect: Rect::new(0, 10, 10, 2),
             scrollbar_rect: None,
+            borders: Borders::NONE,
             is_focused: false,
         };
         let larger_overlap_second = PaneInfo {
@@ -876,6 +941,7 @@ mod tests {
             rect: Rect::new(0, 10, 10, 8),
             inner_rect: Rect::new(0, 10, 10, 8),
             scrollbar_rect: None,
+            borders: Borders::NONE,
             is_focused: false,
         };
         let panes = vec![focused.clone(), small_overlap_first, larger_overlap_second];

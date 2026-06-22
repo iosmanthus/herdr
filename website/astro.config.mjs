@@ -104,20 +104,26 @@ export default defineConfig({
           items: [
             { label: 'Overview', slug: 'docs' },
             { label: 'Install', slug: 'docs/install' },
-            { label: 'Windows beta', slug: 'docs/windows-beta' },
             { label: 'Quick start', slug: 'docs/quick-start' },
-            { label: 'How to work with Herdr', slug: 'docs/how-to-work' },
             { label: 'Concepts', slug: 'docs/concepts' },
+            { label: 'Keyboard', slug: 'docs/keyboard' },
+            { label: 'How to work with Herdr', slug: 'docs/how-to-work' },
           ],
         },
         {
           label: 'Core guides',
           items: [
             { label: 'Agents', slug: 'docs/agents' },
-            { label: 'Integrations', slug: 'docs/integrations' },
-            { label: 'Configuration', slug: 'docs/configuration' },
-            { label: 'Persistence and remote access', slug: 'docs/persistence-remote' },
             { label: 'Session state and restore', slug: 'docs/session-state' },
+            { label: 'Persistence and remote access', slug: 'docs/persistence-remote' },
+            { label: 'Configuration', slug: 'docs/configuration' },
+          ],
+        },
+        {
+          label: 'Plugins',
+          items: [
+            { label: 'Plugins', slug: 'docs/plugins' },
+            { label: 'Marketplace', slug: 'docs/marketplace' },
           ],
         },
         {
@@ -125,15 +131,15 @@ export default defineConfig({
           items: [
             { label: 'CLI reference', slug: 'docs/cli-reference' },
             { label: 'Socket API', slug: 'docs/socket-api' },
+            { label: 'Integrations', slug: 'docs/integrations' },
             { label: 'Agent skill file', slug: 'docs/agent-skill' },
+            { label: 'Windows beta', slug: 'docs/windows-beta' },
           ],
         },
         {
           label: 'Updates',
           items: [
-            { label: 'Releases', link: '/releases/' },
             { label: 'Preview docs', slug: 'docs/preview' },
-            { label: 'Blog', link: '/blog/' },
           ],
         },
       ],
