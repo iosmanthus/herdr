@@ -27,6 +27,7 @@ mod agent_detection;
 mod cursor;
 mod input;
 mod kitty_keyboard;
+mod modify_other_keys;
 mod osc;
 mod state;
 mod terminal;
@@ -2795,12 +2796,19 @@ impl PaneRuntime {
             crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes).unwrap();
         terminal.write(bytes);
 
+        let ghostty = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        // The raw `terminal.write` above seeds libghostty's state directly,
+        // bypassing the output pipeline that normally feeds the per-pane
+        // trackers. Mirror the observation `process_pty_bytes` would have made so
+        // herdr-side detection (e.g. modifyOtherKeys mode 2) reflects the seed.
+        if let Ok(mut core) = ghostty.core.lock() {
+            core.modify_other_keys.observe(bytes);
+        }
+
         (
             Self {
                 pane_id: PaneId::from_raw(0),
-                terminal: Arc::new(PaneTerminal::new(
-                    GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
-                )),
+                terminal: Arc::new(PaneTerminal::new(ghostty)),
                 io: PaneRuntimeIo::TestChannel {
                     sender: tx,
                     resize_tx,
