@@ -361,6 +361,7 @@ impl App {
     ) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
         crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
+        crate::config::set_extended_keys(config.terminal.extended_keys);
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
@@ -1495,6 +1496,7 @@ impl App {
             self.state.default_shell = config.terminal.default_shell.clone();
             self.state.shell_mode = config.terminal.shell_mode;
             self.state.new_terminal_cwd = config.terminal.new_cwd.clone();
+            crate::config::set_extended_keys(config.terminal.extended_keys);
         }
 
         if !invalid_section("worktrees") {
@@ -4816,8 +4818,10 @@ last_pane = "prefix+tab"
         let mut app = test_app();
         let mut workspace = Workspace::test_new("test");
         let focused = workspace.focused_pane_id().unwrap();
+        // modifyOtherKeys mode 2 is the mode that escapes Enter/Tab, so a pane
+        // that enabled it must preserve the extended Shift+Enter encoding.
         let (runtime, mut rx) =
-            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>4;1m", 4);
+            TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"\x1b[>4;2m", 4);
         workspace.tabs[0].runtimes.insert(focused, runtime);
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
