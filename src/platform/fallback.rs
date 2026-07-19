@@ -113,3 +113,15 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
 pub fn show_desktop_notification(_title: &str, _body: Option<&str>) -> std::io::Result<bool> {
     Ok(false)
 }
+
+pub fn show_desktop_notification_with_click_action(
+    _title: &str,
+    _body: Option<&str>,
+    _on_click: Box<dyn FnOnce() + Send>,
+) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+pub fn activate_host_terminal_window() -> bool {
+    false
+}

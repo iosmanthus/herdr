@@ -470,6 +470,130 @@ fn run_notification_command(mut command: Command) -> std::io::Result<bool> {
     Ok(status.success())
 }
 
+/// Show a desktop notification with a default click action. `on_click` runs on
+/// a background thread when the user activates (clicks) the notification.
+///
+/// Uses `notify-send --action` (libnotify >= 0.8), which blocks until the
+/// notification is activated, dismissed, or expires and prints the action key
+/// to stdout on activation. Reading that stdout in a herdr-owned thread keeps
+/// the whole click path in-process — no shell wrapper, external CLI, or IPC.
+/// When the installed notify-send predates `--action` support the command fails
+/// up front and a plain, non-clickable notification is delivered instead. The
+/// notification daemon must invoke the default action on click (e.g. dunst
+/// `mouse_left_click = do_action`).
+pub fn show_desktop_notification_with_click_action(
+    title: &str,
+    body: Option<&str>,
+    on_click: Box<dyn FnOnce() + Send>,
+) -> std::io::Result<bool> {
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Ok(false);
+    }
+
+    let mut command = Command::new("notify-send");
+    command
+        .arg("--app-name")
+        .arg("herdr")
+        .arg("--icon")
+        .arg("herdr")
+        .arg("--hint")
+        .arg("string:desktop-entry:herdr")
+        .arg("--action")
+        .arg("default=Open")
+        .arg("--")
+        .arg(title);
+    if let Some(body) = body.filter(|body| !body.is_empty()) {
+        command.arg(body);
+    }
+
+    let child = match command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+
+    let fallback_title = title.to_owned();
+    let fallback_body = body.map(str::to_owned);
+    std::thread::spawn(move || match wait_for_notification_click(child) {
+        NotificationClickWait::Clicked => on_click(),
+        NotificationClickWait::Dismissed => {}
+        NotificationClickWait::ActionUnsupported => {
+            let _ = show_desktop_notification(&fallback_title, fallback_body.as_deref());
+        }
+    });
+    Ok(true)
+}
+
+/// Outcome of waiting on an action-capable `notify-send` invocation.
+#[derive(Debug, PartialEq, Eq)]
+enum NotificationClickWait {
+    /// The user activated the notification's default action.
+    Clicked,
+    /// The notification was dismissed or expired without activation.
+    Dismissed,
+    /// The command failed, e.g. a libnotify too old for `--action`.
+    ActionUnsupported,
+}
+
+fn wait_for_notification_click(mut child: std::process::Child) -> NotificationClickWait {
+    use std::io::Read as _;
+
+    let mut output = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut output);
+    }
+    match child.wait() {
+        Ok(status) if status.success() => {
+            if output.lines().next().map(str::trim) == Some("default") {
+                NotificationClickWait::Clicked
+            } else {
+                NotificationClickWait::Dismissed
+            }
+        }
+        _ => NotificationClickWait::ActionUnsupported,
+    }
+}
+
+/// Raise the X11 window hosting this client, identified by `$WINDOWID` (set by
+/// most X terminals). Best effort: returns false when the id is missing or no
+/// activation tool is available.
+pub fn activate_host_terminal_window() -> bool {
+    let Some(window_id) = std::env::var("WINDOWID")
+        .ok()
+        .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+    else {
+        return false;
+    };
+
+    for (program, args) in window_activation_commands(&window_id) {
+        let status = Command::new(program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if status.is_ok_and(|status| status.success()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn window_activation_commands(window_id: &str) -> Vec<(&'static str, Vec<String>)> {
+    vec![
+        (
+            "xdotool",
+            vec!["windowactivate".to_owned(), window_id.to_owned()],
+        ),
+        ("wmctrl", vec!["-ia".to_owned(), window_id.to_owned()]),
+    ]
+}
+
 fn read_clipboard_image_with_command(program: &str, args: &[&str]) -> Option<Vec<u8>> {
     let mut command = Command::new(program);
     command.args(args);

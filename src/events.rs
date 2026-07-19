@@ -156,4 +156,10 @@ pub enum AppEvent {
     WorktreeAddFinished(Box<WorktreeAddResult>),
     /// Background `git worktree remove` completed.
     WorktreeRemoveFinished(Box<WorktreeRemoveResult>),
+    /// A clicked system notification asked to focus its originating pane. Sent
+    /// from the notification's background click-watcher thread.
+    FocusNotificationPane {
+        workspace_id: String,
+        pane_id: PaneId,
+    },
 }

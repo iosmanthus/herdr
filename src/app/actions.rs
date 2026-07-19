@@ -2743,6 +2743,9 @@ impl AppState {
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),
+            // Handled at the App level in `handle_internal_event` (needs focus
+            // APIs); it never reaches the state-level dispatch.
+            AppEvent::FocusNotificationPane { .. } => Vec::new(),
         }
     }
 

@@ -645,6 +645,20 @@ pub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Re
     show_desktop_notification_with_command(title, body, |program| Command::new(program))
 }
 
+/// Click-to-focus is Linux-only for now; other platforms deliver a plain
+/// notification and never fire `on_click`.
+pub fn show_desktop_notification_with_click_action(
+    title: &str,
+    body: Option<&str>,
+    _on_click: Box<dyn FnOnce() + Send>,
+) -> std::io::Result<bool> {
+    show_desktop_notification(title, body)
+}
+
+pub fn activate_host_terminal_window() -> bool {
+    false
+}
+
 fn show_desktop_notification_with_command(
     title: &str,
     body: Option<&str>,

@@ -59,6 +59,23 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
+        if let AppEvent::FocusNotificationPane {
+            workspace_id,
+            pane_id,
+        } = ev
+        {
+            if let Some(ws_idx) = self
+                .state
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == workspace_id)
+            {
+                self.focus_pane_internal_via_api(ws_idx, pane_id);
+            }
+            crate::platform::activate_host_terminal_window();
+            return;
+        }
+
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);
@@ -609,12 +626,6 @@ impl App {
             return;
         }
 
-        let notify = match self.state.toast_config.delivery {
-            crate::config::ToastDelivery::Terminal => crate::terminal_notify::show_notification,
-            crate::config::ToastDelivery::System => crate::platform::show_desktop_notification,
-            _ => return,
-        };
-
         for update in pane_updates {
             let is_active_tab = self
                 .state
@@ -655,15 +666,41 @@ impl App {
             };
             let workspace_label =
                 ws.display_name_from(&self.state.terminals, &self.terminal_runtimes);
-            let _ = notify(
-                &format!("{} {}", agent_label, event_text),
-                Some(&crate::app::actions::notification_context(
-                    ws,
-                    &workspace_label,
-                    update.ws_idx,
-                    update.pane_id,
-                )),
+            let title = format!("{agent_label} {event_text}");
+            let body = crate::app::actions::notification_context(
+                ws,
+                &workspace_label,
+                update.ws_idx,
+                update.pane_id,
             );
+            match self.state.toast_config.delivery {
+                crate::config::ToastDelivery::Terminal => {
+                    let _ = crate::terminal_notify::show_notification(&title, Some(&body));
+                }
+                crate::config::ToastDelivery::System => {
+                    // Click-to-focus: a herdr-owned background thread watches the
+                    // notification's default action and routes the click back
+                    // in-process via an AppEvent — no wire protocol, no external
+                    // CLI, no held state beyond the thread itself.
+                    let workspace_id = ws.id.clone();
+                    let pane_id = update.pane_id;
+                    let event_tx = self.event_tx.clone();
+                    let on_click = Box::new(move || {
+                        let _ = event_tx.blocking_send(
+                            crate::events::AppEvent::FocusNotificationPane {
+                                workspace_id,
+                                pane_id,
+                            },
+                        );
+                    });
+                    let _ = crate::platform::show_desktop_notification_with_click_action(
+                        &title,
+                        Some(&body),
+                        on_click,
+                    );
+                }
+                _ => {}
+            }
         }
     }
 
@@ -696,17 +733,40 @@ impl App {
             return;
         }
 
-        let notify = match self.state.toast_config.delivery {
-            crate::config::ToastDelivery::Terminal => crate::terminal_notify::show_notification,
-            crate::config::ToastDelivery::System => crate::platform::show_desktop_notification,
-            _ => unreachable!("toast delivery was checked above"),
-        };
-
         for delivery in deliveries {
             let Some(toast) = &delivery.client_notification else {
                 continue;
             };
-            let _ = notify(&toast.title, Some(&toast.context));
+            match self.state.toast_config.delivery {
+                crate::config::ToastDelivery::Terminal => {
+                    let _ = crate::terminal_notify::show_notification(
+                        &toast.title,
+                        Some(&toast.context),
+                    );
+                }
+                crate::config::ToastDelivery::System => {
+                    // Click-to-focus for the delayed path too — this is the
+                    // DEFAULT delivery (`ui.toast.delay_seconds` defaults to 1, so
+                    // agent notifications route here, not the immediate path).
+                    let workspace_id = delivery.workspace_id.clone();
+                    let pane_id = delivery.pane_id;
+                    let event_tx = self.event_tx.clone();
+                    let on_click = Box::new(move || {
+                        let _ = event_tx.blocking_send(
+                            crate::events::AppEvent::FocusNotificationPane {
+                                workspace_id,
+                                pane_id,
+                            },
+                        );
+                    });
+                    let _ = crate::platform::show_desktop_notification_with_click_action(
+                        &toast.title,
+                        Some(&toast.context),
+                        on_click,
+                    );
+                }
+                _ => {}
+            }
         }
     }
 
