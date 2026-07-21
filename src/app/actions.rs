@@ -2644,6 +2644,24 @@ impl AppState {
                 }
                 Vec::new()
             }
+            AppEvent::IntegrationsOutdated { targets } => {
+                if !targets.is_empty()
+                    && matches!(
+                        self.toast_config.delivery,
+                        crate::config::ToastDelivery::Herdr
+                    )
+                {
+                    self.toast = Some(ToastNotification {
+                        kind: ToastKind::UpdateInstalled,
+                        title: "Integrations need updating".to_string(),
+                        context: crate::integration::integration_update_instructions(&targets)
+                            .replace('`', ""),
+                        position: None,
+                        target: None,
+                    });
+                }
+                Vec::new()
+            }
             AppEvent::AgentDetectionManifestsUpdated { updated, status } => {
                 self.agent_manifest_update_status = status;
                 self.refresh_agent_manifest_summaries();
@@ -5336,6 +5354,52 @@ mod tests {
         assert_eq!(toast.kind, ToastKind::UpdateInstalled);
         assert_eq!(toast.title, "Agent detection rules updated");
         assert_eq!(toast.context, "codex 2026.06.10.1");
+    }
+
+    #[test]
+    fn outdated_integrations_event_raises_toast_with_install_instructions() {
+        let mut state = AppState::test_new();
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+
+        let updates = state.handle_app_event(AppEvent::IntegrationsOutdated {
+            targets: vec![
+                crate::api::schema::IntegrationTarget::Claude,
+                crate::api::schema::IntegrationTarget::Codex,
+            ],
+        });
+
+        assert!(updates.is_empty());
+        let toast = state.toast.as_ref().expect("outdated integration toast");
+        assert_eq!(toast.kind, ToastKind::UpdateInstalled);
+        assert_eq!(toast.title, "Integrations need updating");
+        assert_eq!(
+            toast.context,
+            "run herdr integration install claude and herdr integration install codex"
+        );
+    }
+
+    #[test]
+    fn outdated_integrations_event_is_ignored_for_non_herdr_toast_delivery() {
+        let mut state = AppState::test_new();
+        state.toast_config.delivery = crate::config::ToastDelivery::System;
+
+        state.handle_app_event(AppEvent::IntegrationsOutdated {
+            targets: vec![crate::api::schema::IntegrationTarget::Claude],
+        });
+
+        assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn outdated_integrations_event_without_targets_does_not_toast() {
+        let mut state = AppState::test_new();
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+
+        state.handle_app_event(AppEvent::IntegrationsOutdated {
+            targets: Vec::new(),
+        });
+
+        assert!(state.toast.is_none());
     }
 
     #[test]
