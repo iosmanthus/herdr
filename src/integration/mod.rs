@@ -17,7 +17,7 @@ pub(crate) use env::{
 };
 pub(crate) use registry::{
     installed_integration_statuses, integration_recommendations, integration_target_label,
-    print_outdated_update_notice,
+    integration_update_instructions, print_outdated_update_notice,
 };
 pub(crate) use types::{IntegrationRecommendation, IntegrationStatus, IntegrationStatusKind};
 

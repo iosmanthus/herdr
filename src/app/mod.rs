@@ -219,6 +219,15 @@ fn background_update_check_enabled(no_session: bool, check_enabled: bool) -> boo
     auto_updates_enabled(no_session) && check_enabled
 }
 
+/// Whether startup should announce integrations that have fallen behind the
+/// assets this binary ships. Unlike [`auto_updates_enabled`] this stays on in
+/// monolithic no-session mode — the notice only reads state, it never mutates
+/// the install — but debug builds opt out to keep tests independent of the
+/// developer's installed integrations.
+fn startup_integration_notice_enabled() -> bool {
+    !cfg!(debug_assertions)
+}
+
 fn load_plugin_registry(no_session: bool) -> crate::app::state::InstalledPluginRegistry {
     if no_session {
         return std::collections::HashMap::new();
@@ -691,6 +700,25 @@ impl App {
                 .resolved_identity_cwd_from(&state.terminals, &restored_terminal_runtimes);
             state.workspaces[ws_idx].cached_git_branch =
                 cwd.as_deref().and_then(crate::workspace::git_branch);
+        }
+
+        // Surface hook scripts that have rotted behind the assets this binary
+        // ships. `herdr update` prints the same notice after a self-update, but
+        // installs owned by an external package manager never take that path,
+        // so without this the only signal is the settings badge.
+        //
+        // Debug builds stay silent for the same reason background update checks
+        // do: the recommendation probe reads the developer's real home
+        // directory, so emitting here would make every test that inspects the
+        // app event queue depend on which integrations happen to be installed
+        // on the machine running it.
+        if startup_integration_notice_enabled() {
+            let outdated_integrations = state.outdated_integration_targets();
+            if !outdated_integrations.is_empty() {
+                let _ = event_tx.try_send(crate::events::AppEvent::IntegrationsOutdated {
+                    targets: outdated_integrations,
+                });
+            }
         }
 
         // Background auto-update is disabled in monolithic no-session mode
