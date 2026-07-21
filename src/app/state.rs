@@ -1626,9 +1626,17 @@ impl AppState {
     }
 
     pub(crate) fn integration_updates_available(&self) -> bool {
+        !self.outdated_integration_targets().is_empty()
+    }
+
+    pub(crate) fn outdated_integration_targets(
+        &self,
+    ) -> Vec<crate::api::schema::IntegrationTarget> {
         self.integration_recommendations
             .iter()
-            .any(|item| item.state == crate::integration::IntegrationStatusKind::Outdated)
+            .filter(|item| item.state == crate::integration::IntegrationStatusKind::Outdated)
+            .map(|item| item.target)
+            .collect()
     }
 
     pub(crate) fn refresh_agent_manifest_summaries(&mut self) {

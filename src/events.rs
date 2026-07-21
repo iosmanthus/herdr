@@ -122,6 +122,11 @@ pub enum AppEvent {
         version: String,
         install_command: String,
     },
+    /// Installed agent integrations are older than the assets this binary
+    /// ships. Raised once at startup.
+    IntegrationsOutdated {
+        targets: Vec<crate::api::schema::IntegrationTarget>,
+    },
     /// Remote agent detection manifest update check finished.
     AgentDetectionManifestsUpdated {
         updated: Vec<crate::detect::manifest_update::ManifestUpdateCommit>,

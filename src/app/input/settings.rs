@@ -719,6 +719,28 @@ mod tests {
     }
 
     #[test]
+    fn outdated_integration_targets_lists_only_outdated_recommendations() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.integration_recommendations = vec![
+            integration_recommendation(crate::integration::IntegrationStatusKind::Current, true),
+            integration_recommendation(
+                crate::integration::IntegrationStatusKind::NotInstalled,
+                true,
+            ),
+        ];
+        assert!(state.outdated_integration_targets().is_empty());
+
+        state.integration_recommendations = vec![integration_recommendation(
+            crate::integration::IntegrationStatusKind::Outdated,
+            true,
+        )];
+        assert_eq!(
+            state.outdated_integration_targets(),
+            vec![crate::api::schema::IntegrationTarget::Claude]
+        );
+    }
+
+    #[test]
     fn settings_tab_hit_area_includes_integration_update_badge() {
         let mut state = state_with_workspaces(&["test"]);
         state.integration_recommendations = vec![integration_recommendation(
