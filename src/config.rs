@@ -19,10 +19,11 @@ pub use self::{
         IndexedKeybind, Keybinds, LiveKeybindConfig,
     },
     model::{
-        validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, ShellModeConfig,
-        SidebarCollapsedModeConfig, TabBarPositionConfig, ToastClipboardPosition, ToastConfig,
-        ToastDelivery, ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
+        extended_keys, set_extended_keys, validated_sidebar_bounds, AgentPanelSortConfig, Config,
+        ConfigReloadReport, ConfigReloadStatus, ExtendedKeysConfig, HostCursorModeConfig,
+        NewTerminalCwdConfig, ShellModeConfig, SidebarCollapsedModeConfig, TabBarPositionConfig,
+        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
+        UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,

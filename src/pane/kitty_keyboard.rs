@@ -3,7 +3,6 @@ pub(crate) struct KittyKeyboardTracker {
     pending: Vec<u8>,
     stack: Vec<u16>,
     flags: u16,
-    #[cfg(windows)]
     modify_other_keys: bool,
 }
 
@@ -32,7 +31,6 @@ impl KittyKeyboardTracker {
                 self.store_pending(&bytes[index..]);
                 break;
             }
-            #[cfg(windows)]
             if bytes[index + 1] == b'c' {
                 self.modify_other_keys = false;
             }
@@ -52,9 +50,7 @@ impl KittyKeyboardTracker {
 
             match bytes[end] {
                 b'u' => self.observe_csi_u(&bytes[index + 2..end]),
-                #[cfg(windows)]
                 b'm' => self.observe_modify_other_keys(&bytes[index + 2..end]),
-                #[cfg(windows)]
                 b'n' if bytes[index + 2..end]
                     .strip_prefix(b">")
                     .is_some_and(|params| {
@@ -69,12 +65,10 @@ impl KittyKeyboardTracker {
         }
     }
 
-    #[cfg(windows)]
     pub(crate) fn modify_other_keys_enabled(&self) -> bool {
         self.modify_other_keys
     }
 
-    #[cfg(windows)]
     fn observe_modify_other_keys(&mut self, params: &[u8]) {
         let Some(params) = params.strip_prefix(b">") else {
             return;
@@ -166,13 +160,10 @@ mod tests {
 
         assert_eq!(tracker.flags, 1);
         assert_eq!(tracker.stack, vec![0]);
-        #[cfg(windows)]
-        {
-            assert!(tracker.modify_other_keys_enabled());
-            tracker.observe(b"\x1b[>1m");
-            assert!(tracker.modify_other_keys_enabled());
-            tracker.observe(b"\x1b[>04n");
-            assert!(!tracker.modify_other_keys_enabled());
-        }
+        assert!(tracker.modify_other_keys_enabled());
+        tracker.observe(b"\x1b[>1m");
+        assert!(tracker.modify_other_keys_enabled());
+        tracker.observe(b"\x1b[>04n");
+        assert!(!tracker.modify_other_keys_enabled());
     }
 }

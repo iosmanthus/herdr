@@ -1414,6 +1414,7 @@ impl GhosttyPaneTerminal {
 
         if input_state.modify_other_keys {
             core.terminal.write(b"\x1b[>4;2m");
+            core.kitty_keyboard.observe(b"\x1b[>4;2m");
         }
 
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
@@ -1620,14 +1621,10 @@ impl GhosttyPaneTerminal {
             mouse_protocol_mode,
             mouse_protocol_encoding,
             mouse_alternate_scroll,
-            #[cfg(windows)]
+            // Read the tracked control-stream state, never `keyboard_state_ansi()`:
+            // the formatter replays screen content, so any pane with a prompt on
+            // screen looked like it had enabled modifyOtherKeys.
             modify_other_keys: core.kitty_keyboard.modify_other_keys_enabled(),
-            #[cfg(not(windows))]
-            modify_other_keys: core
-                .terminal
-                .keyboard_state_ansi()
-                .ok()
-                .is_some_and(|ansi| !ansi.is_empty()),
             color_scheme_reporting: core
                 .terminal
                 .mode_get(crate::ghostty::MODE_COLOR_SCHEME_REPORT)
@@ -1676,10 +1673,32 @@ impl GhosttyPaneTerminal {
             .unwrap_or(false)
     }
 
+    /// Whether the pane's running program asked for enhanced encoding of
+    /// modified keys — either by pushing the Kitty keyboard protocol or by
+    /// enabling xterm modifyOtherKeys mode 2 (`CSI > 4 ; 2 m`). Reads the
+    /// authoritative terminal/tracker state (what the encoder itself is driven
+    /// by), not the caller-supplied protocol hint.
+    fn wants_enhanced_modified_keys(&self) -> bool {
+        let Ok(core) = self.core.lock() else {
+            return false;
+        };
+        let kitty = core.terminal.kitty_keyboard_flags().is_ok_and(|f| f != 0);
+        kitty || core.kitty_keyboard.modify_other_keys_enabled()
+    }
+
     pub fn encode_terminal_key(
         &self,
         key: crate::input::TerminalKey,
         protocol: crate::input::KeyboardProtocol,
+    ) -> Vec<u8> {
+        self.encode_terminal_key_with_mode(key, protocol, crate::config::extended_keys())
+    }
+
+    pub fn encode_terminal_key_with_mode(
+        &self,
+        key: crate::input::TerminalKey,
+        protocol: crate::input::KeyboardProtocol,
+        extended_keys: crate::config::ExtendedKeysConfig,
     ) -> Vec<u8> {
         #[cfg(windows)]
         if self.core.lock().is_ok_and(|core| {
@@ -1695,10 +1714,10 @@ impl GhosttyPaneTerminal {
 
         let repeat_count = key.repeat_count;
         let first = key.with_repeat_count(1);
-        let mut bytes = self.encode_terminal_key_once(first.clone(), protocol);
+        let mut bytes = self.encode_terminal_key_once(first.clone(), protocol, extended_keys);
         if repeat_count > 1 && first.kind != crossterm::event::KeyEventKind::Release {
             let repeated = first.with_kind(crossterm::event::KeyEventKind::Repeat);
-            let repeated_bytes = self.encode_terminal_key_once(repeated, protocol);
+            let repeated_bytes = self.encode_terminal_key_once(repeated, protocol, extended_keys);
             for _ in 1..repeat_count {
                 bytes.extend_from_slice(&repeated_bytes);
             }
@@ -1710,27 +1729,59 @@ impl GhosttyPaneTerminal {
         &self,
         key: crate::input::TerminalKey,
         protocol: crate::input::KeyboardProtocol,
+        extended_keys: crate::config::ExtendedKeysConfig,
     ) -> Vec<u8> {
+        use crate::config::ExtendedKeysConfig;
+
         if ghostty_prefers_herdr_text_encoding(&key) {
-            return crate::input::encode_terminal_key(key, protocol);
+            // Character keys: `off` forces the legacy encoding (so Ctrl+Shift+a
+            // stays a C0 byte instead of `ESC[97;6u`); otherwise honor the pane's
+            // negotiated protocol.
+            let char_protocol = match extended_keys {
+                ExtendedKeysConfig::Off => crate::input::KeyboardProtocol::Legacy,
+                ExtendedKeysConfig::Auto | ExtendedKeysConfig::Always => protocol,
+            };
+            return crate::input::encode_terminal_key(key, char_protocol);
         }
+
+        // Whether the running program asked for extended encodings of modified
+        // keys. `off`/`always` override the pane's negotiated state.
+        let enhanced = match extended_keys {
+            ExtendedKeysConfig::Off => false,
+            ExtendedKeysConfig::Auto => self.wants_enhanced_modified_keys(),
+            ExtendedKeysConfig::Always => true,
+        };
 
         let Some(event) = ghostty_key_event_from_terminal_key(&key) else {
             return crate::input::encode_terminal_key(key, protocol);
         };
 
-        let Ok(mut encoder) = self.key_encoder.lock() else {
-            return crate::input::encode_terminal_key(key, protocol);
+        let encoded = {
+            let Ok(mut encoder) = self.key_encoder.lock() else {
+                return crate::input::encode_terminal_key(key, protocol);
+            };
+            encoder.encode(&event)
         };
-        match encoder.encode(&event) {
+        let out = match encoded {
             Ok(bytes)
                 if !bytes.is_empty()
                     && encoded_key_preserves_event_kind(&bytes, &key, protocol) =>
             {
                 bytes
             }
-            Ok(_) | Err(_) => crate::input::encode_terminal_key(key, protocol),
+            Ok(_) | Err(_) => return crate::input::encode_terminal_key(key, protocol),
+        };
+
+        // Keys without a legacy modified byte form (Shift+Enter, Ctrl+Tab,
+        // Shift+Esc, ...) get a disambiguating extended sequence from libghostty.
+        // A plain line editor (e.g. zsh) reads the leading ESC as an edit command
+        // and mangles the line. When the pane hasn't requested extended keys,
+        // fall back to the legacy encoding (Shift+Enter -> CR, Ctrl+Tab -> TAB).
+        // Legacy modified forms (`ESC[1;2A`, `ESC[Z`, `ESC[5;2~`) are left intact.
+        if !enhanced && is_extended_key_sequence(&out) {
+            return crate::input::encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
         }
+        out
     }
 
     pub fn encode_mouse_button(
@@ -3071,6 +3122,18 @@ fn should_probe_host_terminal_theme_restore(core: &GhosttyPaneCore) -> bool {
         .unwrap_or(false)
 }
 
+/// True when `out` is an "extended key" escape sequence — the two forms a pane
+/// only understands after enabling an enhanced keyboard protocol:
+///   - Kitty CSI u:           `ESC [ ... u`
+///   - xterm modifyOtherKeys: `ESC [ 27 ; ... ~`
+///
+/// Deliberately matches the `27;` *prefix* (not a trailing `~`): legacy modified
+/// function/navigation keys also end in `~` (e.g. Shift+PageUp `ESC[5;2~`) and
+/// must NOT be treated as extended.
+fn is_extended_key_sequence(out: &[u8]) -> bool {
+    (out.starts_with(b"\x1b[") && out.last() == Some(&b'u')) || out.starts_with(b"\x1b[27;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4168,7 +4231,10 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_modify_other_keys_mode_one_preserves_shift_enter() {
+    fn ghostty_modify_other_keys_mode_one_sends_cr_for_shift_enter() {
+        // xterm modifyOtherKeys=1 does not escape "special" keys that have a
+        // well-defined legacy meaning (Enter, Tab, ...), so Shift+Enter must stay
+        // a bare CR — only mode 2 escapes them.
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
@@ -4177,7 +4243,162 @@ mod tests {
         pane.seed_history_ansi("\x1b[>4;1m");
         let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
 
+        assert_eq!(encoded, b"\r");
+    }
+
+    #[test]
+    fn ghostty_modify_other_keys_mode_two_preserves_shift_enter() {
+        // xterm modifyOtherKeys=2 escapes every modified key, including Enter, so
+        // Shift+Enter is preserved as the modifyOtherKeys sequence.
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[>4;2m", &tx);
+
+        let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
+        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+
         assert_eq!(encoded, b"\x1b[27;2;13~");
+    }
+
+    #[test]
+    fn is_extended_key_sequence_matches_csi_u_and_csi27_only() {
+        // Extended forms.
+        assert!(super::is_extended_key_sequence(b"\x1b[27;2;13~")); // Shift+Enter modifyOtherKeys
+        assert!(super::is_extended_key_sequence(b"\x1b[27;5;9~")); // Ctrl+Tab modifyOtherKeys
+        assert!(super::is_extended_key_sequence(b"\x1b[13;2u")); // Shift+Enter kitty CSI u
+        assert!(super::is_extended_key_sequence(b"\x1b[97;6u")); // Ctrl+Shift+a kitty CSI u
+                                                                 // NOT extended — legacy forms that must be preserved.
+        assert!(!super::is_extended_key_sequence(b"\x1b[5;2~")); // Shift+PageUp (ends in ~, not 27;)
+        assert!(!super::is_extended_key_sequence(b"\x1b[15;2~")); // Shift+F5
+        assert!(!super::is_extended_key_sequence(b"\x1b[1;2A")); // Shift+Up
+        assert!(!super::is_extended_key_sequence(b"\x1b[Z")); // Shift+Tab (BackTab)
+        assert!(!super::is_extended_key_sequence(b"\r"));
+        assert!(!super::is_extended_key_sequence(b""));
+    }
+
+    fn plain_pane(tx: mpsc::Sender<Bytes>) -> GhosttyPaneTerminal {
+        GhosttyPaneTerminal::new(crate::ghostty::Terminal::new(80, 24, 0).unwrap(), tx).unwrap()
+    }
+
+    fn kitty_pane(tx: mpsc::Sender<Bytes>) -> GhosttyPaneTerminal {
+        let pane = plain_pane(tx.clone());
+        pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b[>5u", &tx);
+        pane
+    }
+
+    fn enc_mode(
+        pane: &GhosttyPaneTerminal,
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+        mode: crate::config::ExtendedKeysConfig,
+    ) -> Vec<u8> {
+        pane.encode_terminal_key_with_mode(
+            crate::input::TerminalKey::new(code, mods),
+            crate::input::KeyboardProtocol::Legacy,
+            mode,
+        )
+    }
+
+    #[test]
+    fn extended_keys_auto_generalizes_beyond_enter_on_plain_pane() {
+        use crossterm::event::{KeyCode as KC, KeyModifiers as KM};
+        let (tx, _rx) = mpsc::channel(4);
+        let pane = plain_pane(tx);
+        let auto = crate::config::ExtendedKeysConfig::Auto;
+        // No-legacy-form keys must drop to their base byte (no ESC[...u / ESC[27;...~).
+        assert_eq!(enc_mode(&pane, KC::Enter, KM::SHIFT, auto), b"\r");
+        assert_eq!(enc_mode(&pane, KC::Tab, KM::CONTROL, auto), b"\t"); // was leaking ESC[27;5;9~
+        assert_eq!(enc_mode(&pane, KC::Esc, KM::SHIFT, auto), b"\x1b"); // was leaking ESC[27;2;27~
+                                                                        // Keys with a legacy modified form must be preserved untouched.
+        assert_eq!(enc_mode(&pane, KC::Tab, KM::SHIFT, auto), b"\x1b[Z");
+        assert_eq!(enc_mode(&pane, KC::Up, KM::SHIFT, auto), b"\x1b[1;2A");
+        assert_eq!(enc_mode(&pane, KC::Delete, KM::SHIFT, auto), b"\x1b[3;2~");
+    }
+
+    #[test]
+    fn extended_keys_auto_stays_legacy_after_pane_prints_output() {
+        use crossterm::event::{KeyCode as KC, KeyModifiers as KM};
+        let (tx, _rx) = mpsc::channel(4);
+        let pane = plain_pane(tx.clone());
+        // Every real pane has screen content (shell prompt, command output).
+        // Content alone must not flip the modifyOtherKeys detection: only the
+        // pane's keyboard state may.
+        pane.process_pty_bytes(
+            PaneId::from_raw(1),
+            0,
+            b"user@host ~ % ls\r\nsrc\r\n% ",
+            &tx,
+        );
+        assert!(pane
+            .input_state()
+            .is_some_and(|state| !state.modify_other_keys));
+        let auto = crate::config::ExtendedKeysConfig::Auto;
+        assert_eq!(enc_mode(&pane, KC::Enter, KM::SHIFT, auto), b"\r");
+        assert_eq!(enc_mode(&pane, KC::Enter, KM::CONTROL, auto), b"\r");
+        assert_eq!(
+            enc_mode(&pane, KC::Enter, KM::CONTROL | KM::SHIFT, auto),
+            b"\r"
+        );
+        // A pane that really enabled modifyOtherKeys mode 2 still gets the
+        // extended encoding.
+        pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b[>4;2m", &tx);
+        assert!(pane
+            .input_state()
+            .is_some_and(|state| state.modify_other_keys));
+        assert_eq!(
+            enc_mode(&pane, KC::Enter, KM::SHIFT, auto),
+            b"\x1b[27;2;13~"
+        );
+    }
+
+    #[test]
+    fn extended_keys_off_forces_legacy_even_on_kitty_pane() {
+        use crossterm::event::{KeyCode as KC, KeyModifiers as KM};
+        let (tx, _rx) = mpsc::channel(4);
+        let pane = kitty_pane(tx);
+        let off = crate::config::ExtendedKeysConfig::Off;
+        assert_eq!(enc_mode(&pane, KC::Enter, KM::SHIFT, off), b"\r");
+        // Char keys also respect `off`: Ctrl+Shift+a -> C0, not ESC[97;6u.
+        assert_eq!(
+            enc_mode(&pane, KC::Char('a'), KM::CONTROL | KM::SHIFT, off),
+            b"\x01"
+        );
+    }
+
+    #[test]
+    fn extended_keys_always_emits_extended_on_plain_pane() {
+        use crossterm::event::{KeyCode as KC, KeyModifiers as KM};
+        let (tx, _rx) = mpsc::channel(4);
+        let pane = plain_pane(tx);
+        let always = crate::config::ExtendedKeysConfig::Always;
+        assert_eq!(
+            enc_mode(&pane, KC::Enter, KM::SHIFT, always),
+            b"\x1b[27;2;13~"
+        );
+        assert_eq!(
+            enc_mode(&pane, KC::Tab, KM::CONTROL, always),
+            b"\x1b[27;5;9~"
+        );
+    }
+
+    #[test]
+    fn ghostty_plain_pane_encodes_shift_enter_as_cr() {
+        // A pane that negotiated neither the Kitty keyboard protocol nor xterm
+        // modifyOtherKeys (e.g. a plain shell) must receive a bare CR for
+        // Shift+Enter. Otherwise libghostty's `ESC[27;2;13~` leaks through and a
+        // line editor like zsh interprets the leading ESC as an edit command.
+        let (tx, _rx) = mpsc::channel(4);
+        let pane = plain_pane(tx);
+        let encoded = pane.encode_terminal_key(
+            crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::SHIFT,
+            ),
+            crate::input::KeyboardProtocol::Legacy,
+        );
+        assert_eq!(encoded, b"\r");
     }
 
     #[test]
