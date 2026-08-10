@@ -9895,9 +9895,11 @@ next_tab = ""
                 kind,
                 message,
                 body,
+                target,
             } => {
                 assert_eq!(kind, protocol::NotifyKind::Toast);
                 assert_eq!(message, "Paste rejected");
+                assert_eq!(target, None);
                 assert_eq!(
                     body.as_deref(),
                     Some("Input message is 5000012 bytes; Herdr's limit is 1048576 bytes")

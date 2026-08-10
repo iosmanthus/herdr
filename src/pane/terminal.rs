@@ -1335,7 +1335,9 @@ impl GhosttyPaneTerminal {
         let Ok(mut core) = self.core.lock() else {
             return;
         };
-        #[cfg(windows)]
+        // Every platform, not just Windows: the encode path gates extended key
+        // sequences on this tracker, so a pane restored from a handoff must carry
+        // its modifyOtherKeys state across or Shift+Enter silently degrades to CR.
         core.kitty_keyboard.observe(ansi.as_bytes());
         core.terminal.write(ansi.as_bytes());
         #[cfg(windows)]
@@ -4231,19 +4233,43 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_modify_other_keys_mode_one_sends_cr_for_shift_enter() {
-        // xterm modifyOtherKeys=1 does not escape "special" keys that have a
-        // well-defined legacy meaning (Enter, Tab, ...), so Shift+Enter must stay
-        // a bare CR — only mode 2 escapes them.
+    fn ghostty_modify_other_keys_mode_one_preserves_shift_enter() {
+        // herdr treats any non-zero modifyOtherKeys resource as "the program wants
+        // extended encodings" (matching the tracker the Windows conpty fallback
+        // already relies on), so mode 1 preserves Shift+Enter just like mode 2.
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b[>4;1m", &tx);
+
+        let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
+        let encoded = pane.encode_terminal_key_with_mode(
+            key,
+            crate::input::KeyboardProtocol::Legacy,
+            crate::config::ExtendedKeysConfig::Auto,
+        );
+
+        assert_eq!(encoded, b"\x1b[27;2;13~");
+    }
+
+    #[test]
+    fn ghostty_seeded_history_restores_modify_other_keys_state() {
+        // A pane restored from a handoff replays its keyboard state through
+        // seed_history_ansi; the tracker must pick it up or the restored pane
+        // silently loses extended Shift+Enter.
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        pane.seed_history_ansi("\x1b[>4;2m");
+
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
+        let encoded = pane.encode_terminal_key_with_mode(
+            key,
+            crate::input::KeyboardProtocol::Legacy,
+            crate::config::ExtendedKeysConfig::Auto,
+        );
 
-        pane.seed_history_ansi("\x1b[>4;1m");
-        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
-
-        assert_eq!(encoded, b"\r");
+        assert_eq!(encoded, b"\x1b[27;2;13~");
     }
 
     #[test]
