@@ -774,10 +774,118 @@ fn wait_for_notification_click(mut child: std::process::Child) -> NotificationCl
     }
 }
 
-/// Raise the X11 window hosting this client, identified by `$WINDOWID`
-/// (set by kitty and most X terminals). Best effort: returns false when the
-/// id is missing or no activation tool is available.
+/// Raise the terminal window hosting this client. Best effort: returns false
+/// when the window cannot be identified or no activation tool is available.
+///
+/// Under niri the window is looked up over niri's IPC. Everywhere else this
+/// falls back to the X11 window id in `$WINDOWID`, which kitty and most X
+/// terminals set -- but Wayland-native terminals do not, so on a Wayland
+/// session that path alone never finds anything.
 pub fn activate_host_terminal_window() -> bool {
+    if std::env::var_os("NIRI_SOCKET").is_some() && activate_niri_host_window() {
+        return true;
+    }
+    activate_x11_host_window()
+}
+
+/// niri reports every window with the pid of the client that owns it, so the
+/// window hosting this herdr client is the one owned by our nearest ancestor:
+/// normally the terminal emulator directly above us.
+fn activate_niri_host_window() -> bool {
+    let Ok(output) = Command::new("niri")
+        .args(["msg", "--json", "windows"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Some(windows) = parse_niri_window_owners(&output.stdout) else {
+        return false;
+    };
+    let ancestors = process_ancestors(std::process::id());
+    let Some(window_id) = host_window_id(&windows, &ancestors) else {
+        return false;
+    };
+
+    Command::new("niri")
+        .args(niri_focus_window_args(window_id))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// `(window id, owning pid)` for every window in `niri msg --json windows`.
+/// Windows without a known pid are skipped.
+fn parse_niri_window_owners(json: &[u8]) -> Option<Vec<(u64, u32)>> {
+    #[derive(serde::Deserialize)]
+    struct NiriWindow {
+        id: u64,
+        pid: Option<i32>,
+    }
+
+    let windows: Vec<NiriWindow> = serde_json::from_slice(json).ok()?;
+    Some(
+        windows
+            .into_iter()
+            .filter_map(|window| Some((window.id, u32::try_from(window.pid?).ok()?)))
+            .collect(),
+    )
+}
+
+/// `pid` followed by its parents, nearest first, stopping before init.
+fn process_ancestors(pid: u32) -> Vec<u32> {
+    const MAX_DEPTH: usize = 64;
+
+    let mut chain = Vec::new();
+    let mut current = Some(pid);
+    while let Some(pid) = current {
+        if pid <= 1 || chain.len() >= MAX_DEPTH || chain.contains(&pid) {
+            break;
+        }
+        chain.push(pid);
+        current = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| parent_pid_from_stat(&stat));
+    }
+    chain
+}
+
+fn parent_pid_from_stat(stat: &str) -> Option<u32> {
+    // "pid (comm) state ppid ...": comm may contain spaces and parens, so split
+    // after the last ')'.
+    let rest = stat.get(stat.rfind(')')? + 2..)?;
+    rest.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// The window owned by the nearest ancestor. One terminal process can drive
+/// several windows; they then share a pid and the first one listed wins.
+fn host_window_id(windows: &[(u64, u32)], ancestors: &[u32]) -> Option<u64> {
+    ancestors.iter().find_map(|pid| {
+        windows
+            .iter()
+            .find(|(_, owner)| owner == pid)
+            .map(|(id, _)| *id)
+    })
+}
+
+fn niri_focus_window_args(window_id: u64) -> Vec<String> {
+    vec![
+        "msg".to_owned(),
+        "action".to_owned(),
+        "focus-window".to_owned(),
+        "--id".to_owned(),
+        window_id.to_string(),
+    ]
+}
+
+/// Raise the X11 window identified by `$WINDOWID` through xdotool or wmctrl.
+fn activate_x11_host_window() -> bool {
     let Some(window_id) = std::env::var("WINDOWID")
         .ok()
         .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
@@ -1689,6 +1797,53 @@ mod tests {
     }
 
     #[test]
+    fn parent_pid_from_stat_skips_comm_with_spaces_and_parens() {
+        let stat = "4242 (kitty (main) win) S 1717 4242 4242 0 -1 4194560 1234";
+        assert_eq!(parent_pid_from_stat(stat), Some(1717));
+        assert_eq!(parent_pid_from_stat("garbage"), None);
+    }
+
+    #[test]
+    fn parse_niri_window_owners_keeps_windows_with_a_pid() {
+        let json = br#"[
+            {"id": 2, "title": "herdr", "app_id": "kitty", "pid": 370098,
+             "workspace_id": 1, "is_focused": true, "layout": {}},
+            {"id": 7, "title": "wayland-only", "app_id": null, "pid": null},
+            {"id": 9, "title": "Bitwarden", "app_id": "Bitwarden", "pid": 382001}
+        ]"#;
+        assert_eq!(
+            parse_niri_window_owners(json),
+            Some(vec![(2, 370098), (9, 382001)])
+        );
+        assert_eq!(parse_niri_window_owners(b"not json"), None);
+    }
+
+    #[test]
+    fn host_window_id_prefers_the_nearest_ancestor() {
+        let windows = [(2, 100), (5, 300), (6, 300)];
+        // herdr (400) -> shell? (300) -> kitty (100): the window owned by the
+        // closest ancestor wins, and among windows sharing that pid the first.
+        assert_eq!(host_window_id(&windows, &[400, 300, 100]), Some(5));
+        assert_eq!(host_window_id(&windows, &[400, 100]), Some(2));
+        assert_eq!(host_window_id(&windows, &[400, 500]), None);
+    }
+
+    #[test]
+    fn niri_focus_window_args_target_window_id() {
+        assert_eq!(
+            niri_focus_window_args(42),
+            vec!["msg", "action", "focus-window", "--id", "42"]
+        );
+    }
+
+    #[test]
+    fn process_ancestors_starts_with_self_and_walks_up() {
+        let chain = process_ancestors(std::process::id());
+        assert_eq!(chain.first(), Some(&std::process::id()));
+        assert!(!chain.contains(&1));
+    }
+
+    #[test]
     fn window_activation_commands_target_window_id() {
         let commands = window_activation_commands("12345678");
         assert_eq!(
@@ -1706,12 +1861,23 @@ mod tests {
     #[test]
     fn activate_host_terminal_window_requires_numeric_window_id() {
         let _guard = env_lock().lock().unwrap();
-        unsafe { std::env::remove_var("WINDOWID") };
+        // Keep the niri path out of this: run inside a niri session, it would
+        // find and raise the real terminal hosting the test run.
+        let niri_socket = std::env::var_os("NIRI_SOCKET");
+        unsafe {
+            std::env::remove_var("NIRI_SOCKET");
+            std::env::remove_var("WINDOWID");
+        }
         assert!(!activate_host_terminal_window());
 
         unsafe { std::env::set_var("WINDOWID", "not-a-number") };
         assert!(!activate_host_terminal_window());
-        unsafe { std::env::remove_var("WINDOWID") };
+        unsafe {
+            std::env::remove_var("WINDOWID");
+            if let Some(socket) = niri_socket {
+                std::env::set_var("NIRI_SOCKET", socket);
+            }
+        }
     }
 
     #[test]
