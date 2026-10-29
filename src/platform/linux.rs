@@ -13,8 +13,13 @@ use super::{ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess, 
 
 mod clipboard;
 mod input_source;
+mod notifications;
 
 pub(crate) use input_source::{switch_to_ascii_input_source, InputSourceRestore};
+pub use notifications::show_desktop_notification;
+pub(crate) use notifications::{
+    foreground_desktop_notification_host, show_actionable_desktop_notification,
+};
 
 pub(crate) use super::unix_common::{
     configure_status_command, create_remote_private_dir, create_remote_ssh_config_dir,
@@ -988,47 +993,6 @@ fn bytes_match_image_signature(extension: &str, bytes: &[u8]) -> bool {
         }
         _ => false,
     }
-}
-
-/// Show a native desktop notification through libnotify's command-line helper.
-pub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {
-    show_desktop_notification_with_command(title, body, |program| Command::new(program))
-}
-
-fn show_desktop_notification_with_command(
-    title: &str,
-    body: Option<&str>,
-    mut command: impl FnMut(&str) -> Command,
-) -> std::io::Result<bool> {
-    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
-        return Ok(false);
-    }
-
-    let mut cmd = command("notify-send");
-    cmd.arg("--app-name").arg("Herdr");
-    // Themed icon name and desktop entry, both installed by nix/package.nix.
-    cmd.arg("--icon").arg("herdr");
-    cmd.arg("--hint").arg("string:desktop-entry:herdr");
-    cmd.arg("--").arg(title);
-    if let Some(body) = body.filter(|body| !body.is_empty()) {
-        cmd.arg(body);
-    }
-    run_notification_command(cmd)
-}
-
-fn run_notification_command(mut command: Command) -> std::io::Result<bool> {
-    let status = match command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    {
-        Ok(status) => status,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(err),
-    };
-
-    Ok(status.success())
 }
 
 fn read_clipboard_image_until(
@@ -2198,36 +2162,6 @@ mod tests {
             b"BM text is not a bitmap"
         ));
         assert!(!bytes_match_image_signature("svg", b"<svg></svg>"));
-    }
-
-    #[test]
-    fn desktop_notification_sets_app_name_icon_and_separates_option_like_titles() {
-        let _guard = env_lock().lock().unwrap();
-        unsafe {
-            std::env::remove_var("WAYLAND_DISPLAY");
-            std::env::set_var("DISPLAY", ":0");
-        }
-
-        let path =
-            std::env::temp_dir().join(format!("herdr-notify-send-args-{}", std::process::id()));
-        let script = "printf '%s\\n' \"$@\" > \"$HERDR_NOTIFY_ARGS\"";
-        let shown = show_desktop_notification_with_command("-danger", Some("body"), |_| {
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c")
-                .arg(script)
-                .arg("notify-send")
-                .env("HERDR_NOTIFY_ARGS", &path);
-            cmd
-        })
-        .expect("notification command should run");
-
-        assert!(shown);
-        let args = std::fs::read_to_string(&path).expect("args file");
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(
-            args,
-            "--app-name\nHerdr\n--icon\nherdr\n--hint\nstring:desktop-entry:herdr\n--\n-danger\nbody\n"
-        );
     }
 
     #[test]

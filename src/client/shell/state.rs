@@ -722,12 +722,12 @@ pub(crate) enum ClientShellNotificationEffect {
     System {
         title: String,
         body: Option<String>,
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         target: Option<ClientSystemNotificationTarget>,
     },
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClientSystemNotificationTarget {
     pub(crate) endpoint_id: ClientEndpointId,

@@ -36,7 +36,7 @@ pub(crate) enum ClientEndpointFocusTarget {
     Workspace(String),
     Tab(String),
     Pane(String),
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     Notification {
         pane_id: String,
         boot_id: String,

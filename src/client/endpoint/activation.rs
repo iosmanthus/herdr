@@ -592,7 +592,7 @@ impl PendingEndpointActivation {
         focus: Option<crate::client::shell::ClientEndpointFocusTarget>,
         endpoints: &mut EndpointRegistry,
     ) -> Result<(), String> {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         if matches!(&focus, Some(crate::client::shell::ClientEndpointFocusTarget::Notification { boot_id, .. }) if boot_id != &self.target.boot_id)
         {
             return Ok(());
@@ -1189,7 +1189,7 @@ impl PendingEndpointActivation {
             _ => return false,
         };
         match &self.focus {
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             Some(crate::client::shell::ClientEndpointFocusTarget::Notification {
                 pane_id, ..
             }) => {

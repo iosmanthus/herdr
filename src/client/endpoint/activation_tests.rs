@@ -1391,7 +1391,7 @@ fn newer_remote_selection_cancels_deferred_local_selection() {
     assert_eq!(pending.as_ref().unwrap().target(), &endpoint());
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn notification_successor_replay_rejects_a_restarted_destination() {
     use crate::client::shell::ClientEndpointFocusTarget;
@@ -1536,7 +1536,7 @@ fn rollback_keeps_the_latest_intent_even_when_it_returns_to_the_target() {
     );
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn notification_click_on_remote_source_supersedes_a_handoff() {
     use crate::client::shell::{ClientEndpointFocusTarget, ClientSystemNotificationTarget};

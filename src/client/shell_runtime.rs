@@ -233,7 +233,7 @@ pub(super) fn begin_endpoint_activation(
     now: std::time::Instant,
     scheduled_activation: &mut Option<ClientLoopEvent>,
 ) -> Result<(), ClientError> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     if target.as_ref().is_some_and(|target| {
         !state
             .shell
