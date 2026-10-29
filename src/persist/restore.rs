@@ -451,6 +451,7 @@ fn unavailable_restored_terminal(
     if let Some(pane) = pane {
         terminal.manual_label = pane.label.clone();
         terminal.launch_argv = pane.launch_argv.clone();
+        terminal.agent_launch = restored_agent_launch(pane);
         if let Some(session) = restored_terminal_agent_session(pane.agent_session.as_ref(), false) {
             terminal.set_persisted_agent_session(session);
         }
@@ -540,9 +541,10 @@ fn restore_tab(
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_agent_resume = saved_pane.and_then(saved_reported_resume);
+        let saved_agent_launch = saved_pane.and_then(restored_agent_launch);
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
-        let startup = {
+        let mut startup = {
             let mut agent_restore = AgentRestoreState {
                 enabled: runtime_context.resume_agents_on_restore,
                 resumed_sessions: resumed_agent_sessions,
@@ -555,6 +557,13 @@ fn restore_tab(
                 &mut agent_restore,
             )
         };
+        // A command the agent reported itself stays as it is; the built-in
+        // command gets the launch options of the saved agent process.
+        if saved_agent_resume.is_none() {
+            startup.restore_plan = startup.restore_plan.take().map(|plan| {
+                crate::agent_resume::with_launch_options(plan, saved_agent_launch.as_ref())
+            });
+        }
         let restored_agent_resume = saved_agent_resume
             .filter(|_| !startup.duplicate_agent_session)
             .map(reported_resume_from_snapshot);
@@ -599,6 +608,7 @@ fn restore_tab(
             if let Some(session) = restored_agent_session {
                 terminal.set_persisted_agent_session(session);
             }
+            terminal.agent_launch = saved_agent_launch.clone();
             if let Some(resume) = restored_agent_resume {
                 terminal.restore_reported_resume(resume);
             }
@@ -699,6 +709,7 @@ fn restore_tab(
                 if let Some(session) = restored_agent_session {
                     terminal.set_persisted_agent_session(session);
                 }
+                terminal.agent_launch = saved_agent_launch;
                 if let Some(resume) = restored_agent_resume {
                     terminal.restore_reported_resume(resume);
                 }
@@ -860,6 +871,20 @@ fn pane_restore_startup<'a>(
         duplicate_agent_session,
         reserved_agent_session,
     }
+}
+
+/// The saved command line of the agent process. Snapshots of the fork before
+/// v0.9.5 kept it in `launch_argv`. Remove that fallback after the next fork
+/// rebuild.
+fn restored_agent_launch(
+    pane: &super::snapshot::PaneSnapshot,
+) -> Option<crate::agent_resume::AgentLaunch> {
+    pane.agent_launch.clone().or_else(|| {
+        crate::agent_resume::legacy_agent_launch(
+            &pane.agent_session.as_ref()?.agent,
+            pane.launch_argv.as_deref()?,
+        )
+    })
 }
 
 fn saved_reported_resume(pane: &super::snapshot::PaneSnapshot) -> Option<&PaneAgentResumeSnapshot> {
@@ -1554,6 +1579,7 @@ mod tests {
                             }),
                             agent_resume: None,
                             launch_argv: None,
+                            agent_launch: None,
                         },
                     )]),
                     zoomed: false,
@@ -1636,6 +1662,7 @@ mod tests {
                                 agent_session: None,
                                 agent_resume: None,
                                 launch_argv: None,
+                                agent_launch: None,
                             },
                         ),
                         (
@@ -1648,6 +1675,7 @@ mod tests {
                                 agent_session: None,
                                 agent_resume: None,
                                 launch_argv: None,
+                                agent_launch: None,
                             },
                         ),
                     ]),
@@ -1702,6 +1730,7 @@ mod tests {
                     agent_session: None,
                     agent_resume: None,
                     launch_argv: None,
+                    agent_launch: None,
                 },
             )
         };
@@ -1718,6 +1747,7 @@ mod tests {
             }),
             agent_resume: None,
             launch_argv: None,
+            agent_launch: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1837,6 +1867,148 @@ mod tests {
         assert_eq!(next_public_pane_number, 3);
     }
 
+    #[cfg(unix)]
+    fn restored_resume_argv(
+        pane: super::super::snapshot::PaneSnapshot,
+    ) -> (Vec<String>, Option<crate::agent_resume::AgentLaunch>) {
+        let cwd = pane.cwd.clone();
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("workspace".into()),
+                custom_name: None,
+                identity_cwd: cwd,
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 0,
+                public_tab_numbers: Vec::new(),
+                next_public_tab_number: 0,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::from([(0, pane)]),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+        let (events, _event_rx) = mpsc::channel(4);
+        let (_workspaces, terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            true,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let terminal = terminals.values().next().expect("restored terminal");
+        let plan = terminal
+            .pending_agent_resume_plan
+            .as_ref()
+            .expect("native agent resume plan");
+        (plan.argv.clone(), terminal.agent_launch.clone())
+    }
+
+    #[cfg(unix)]
+    fn claude_pane(
+        launch_argv: Option<&[&str]>,
+        agent_launch: Option<&[&str]>,
+    ) -> super::super::snapshot::PaneSnapshot {
+        let strings = |parts: &[&str]| parts.iter().map(|part| part.to_string()).collect();
+        super::super::snapshot::PaneSnapshot {
+            cwd: std::env::current_dir().unwrap(),
+            label: None,
+            agent_name: None,
+            managed_agent_kind: None,
+            agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                kind: crate::agent_resume::AgentSessionRefKind::Id,
+                value: "new-session".into(),
+            }),
+            agent_resume: None,
+            launch_argv: launch_argv.map(strings),
+            agent_launch: agent_launch.map(|argv| crate::agent_resume::AgentLaunch {
+                agent: "claude".into(),
+                argv: strings(argv),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn native_agent_restore_keeps_launch_options() {
+        let launch = [
+            "claude",
+            "--dangerously-skip-permissions",
+            "--resume",
+            "old",
+        ];
+        let (argv, agent_launch) = restored_resume_argv(claude_pane(None, Some(&launch)));
+        assert_eq!(
+            argv,
+            [
+                "claude",
+                "--dangerously-skip-permissions",
+                "--resume",
+                "new-session"
+            ]
+        );
+        assert_eq!(
+            agent_launch.map(|launch| launch.argv),
+            Some(launch.map(str::to_owned).to_vec()),
+            "the launch stays on the terminal for the next restart"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn native_agent_restore_reads_launch_options_from_old_snapshots() {
+        let old = ["claude", "--dangerously-skip-permissions"];
+        let (argv, agent_launch) = restored_resume_argv(claude_pane(Some(&old), None));
+        assert_eq!(
+            argv,
+            [
+                "claude",
+                "--dangerously-skip-permissions",
+                "--resume",
+                "new-session"
+            ]
+        );
+        assert!(agent_launch.is_some());
+
+        // A command line of another agent is not a launch of this session.
+        let other = ["codex", "--dangerously-bypass-approvals-and-sandbox"];
+        let (argv, agent_launch) = restored_resume_argv(claude_pane(Some(&other), None));
+        assert_eq!(argv, ["claude", "--resume", "new-session"]);
+        assert!(agent_launch.is_none());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn reported_resume_command_ignores_launch_options() {
+        let mut pane = claude_pane(None, Some(&["claude", "--verbose"]));
+        pane.agent_resume = Some(PaneAgentResumeSnapshot {
+            source: "custom:wrapper".into(),
+            agent: "claude".into(),
+            argv: vec!["claude".into(), "--resume".into(), "reported".into()],
+        });
+        let (argv, _) = restored_resume_argv(pane);
+        assert_eq!(argv, ["claude", "--resume", "reported"]);
+    }
+
     #[tokio::test]
     #[cfg(unix)]
     async fn native_agent_restore_defers_runtime_launch() {
@@ -1870,6 +2042,7 @@ mod tests {
                             }),
                             agent_resume: None,
                             launch_argv: None,
+                            agent_launch: None,
                         },
                     )]),
                     zoomed: false,
@@ -2176,6 +2349,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                agent_launch: None,
             },
         );
         let mut history = SessionHistorySnapshot {

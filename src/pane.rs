@@ -308,6 +308,31 @@ async fn publish_agent_process_detected_event(
     }
 }
 
+async fn publish_agent_launch_argv_event(
+    state_events: &mpsc::Sender<AppEvent>,
+    pane_id: PaneId,
+    agent: Agent,
+    argv: Option<Vec<String>>,
+) {
+    let Some(argv) = argv else {
+        return;
+    };
+    if let Err(e) = state_events
+        .send(AppEvent::AgentLaunchArgvDetected {
+            pane_id,
+            agent,
+            argv,
+        })
+        .await
+    {
+        warn!(
+            pane = pane_id.raw(),
+            err = %e,
+            "failed to deliver AgentLaunchArgvDetected event"
+        );
+    }
+}
+
 async fn publish_codex_prompt_observation(
     state_events: &mpsc::Sender<AppEvent>,
     pane_id: PaneId,
@@ -800,6 +825,8 @@ struct ProcessProbeResult {
     /// The process that identified as `agent`, which need not lead its job.
     agent_pid: Option<u32>,
     process_name: Option<String>,
+    /// Command line of the `agent_pid` process, for resume with its options.
+    agent_launch_argv: Option<Vec<String>>,
 }
 
 fn agent_hint_for_foreground_job_members(
@@ -840,12 +867,19 @@ fn process_probe_result(
     pid: u32,
     (agent, process_name, agent_pid): (Agent, String, u32),
 ) -> ProcessProbeResult {
+    let agent_launch_argv = job
+        .processes
+        .iter()
+        .find(|process| process.pid == agent_pid)
+        .and_then(|process| process.argv.as_deref())
+        .and_then(|argv| crate::agent_resume::capture_launch_argv(agent, argv));
     ProcessProbeResult {
         process_group_id: Some(job.process_group_id),
         foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
         agent: Some(agent),
         agent_pid: Some(agent_pid),
         process_name: Some(process_name),
+        agent_launch_argv,
     }
 }
 
@@ -901,6 +935,7 @@ fn probe_foreground_process_from_jobs(
             agent: None,
             agent_pid: None,
             process_name: None,
+            agent_launch_argv: None,
         };
     }
 
@@ -910,6 +945,7 @@ fn probe_foreground_process_from_jobs(
         agent: None,
         agent_pid: None,
         process_name: None,
+        agent_launch_argv: None,
     }
 }
 
@@ -1118,6 +1154,13 @@ fn spawn_basic_detection_task(
                                 pane_id,
                                 agent,
                                 now,
+                            )
+                            .await;
+                            publish_agent_launch_argv_event(
+                                &state_events,
+                                pane_id,
+                                agent,
+                                probe.agent_launch_argv.filter(|_| new_agent == Some(agent)),
                             )
                             .await;
                         } else {
@@ -3094,6 +3137,15 @@ impl PaneRuntime {
                                             pane_id,
                                             agent,
                                             now,
+                                        )
+                                        .await;
+                                        publish_agent_launch_argv_event(
+                                            &state_events,
+                                            pane_id,
+                                            agent,
+                                            probe
+                                                .agent_launch_argv
+                                                .filter(|_| new_agent == Some(agent)),
                                         )
                                         .await;
                                     } else {

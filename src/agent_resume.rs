@@ -2,6 +2,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+mod launch;
+
+pub use launch::{capture_launch_argv, legacy_agent_launch, with_launch_options, AgentLaunch};
+
 const MAX_SESSION_ID_LEN: usize = 512;
 const MAX_SESSION_PATH_LEN: usize = 4096;
 const MAX_RESUME_ARGS: usize = 64;

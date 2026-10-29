@@ -1460,6 +1460,23 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::AgentLaunchArgvDetected {
+                pane_id,
+                agent,
+                argv,
+            } => {
+                let terminal_id = self.workspaces.iter().find_map(|ws| {
+                    ws.pane_state(pane_id)
+                        .map(|pane| pane.attached_terminal_id.clone())
+                });
+                let changed = terminal_id
+                    .and_then(|terminal_id| self.terminals.get_mut(&terminal_id))
+                    .is_some_and(|terminal| terminal.record_agent_launch(agent, argv));
+                if changed {
+                    self.mark_session_dirty();
+                }
+                Vec::new()
+            }
             AppEvent::CodexPromptObserved { pane_id, ready } => self
                 .update_terminal_state(pane_id, |terminal| {
                     terminal.observe_codex_prompt_ready(ready)
@@ -2145,6 +2162,59 @@ mod tests {
             state.mode = Mode::Terminal;
         }
         state
+    }
+
+    #[test]
+    fn agent_launch_argv_detected_keeps_the_newest_launch() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let detected = |agent, argv: &[&str]| AppEvent::AgentLaunchArgvDetected {
+            pane_id,
+            agent,
+            argv: argv.iter().map(|arg| arg.to_string()).collect(),
+        };
+        let recorded = |state: &AppState| {
+            state.terminals[&terminal_id]
+                .agent_launch
+                .as_ref()
+                .map(|launch| (launch.agent.clone(), launch.argv.join(" ")))
+        };
+
+        state.session_dirty = false;
+        state.handle_app_event(detected(Agent::Claude, &["claude", "--verbose"]));
+        assert_eq!(
+            recorded(&state),
+            Some(("claude".into(), "claude --verbose".into()))
+        );
+        assert!(state.session_dirty);
+
+        state.session_dirty = false;
+        state.handle_app_event(detected(Agent::Claude, &["claude", "--verbose"]));
+        assert!(
+            !state.session_dirty,
+            "the same launch does not dirty the session"
+        );
+
+        state.handle_app_event(detected(Agent::Claude, &["claude", "--model", "opus"]));
+        assert_eq!(
+            recorded(&state),
+            Some(("claude".into(), "claude --model opus".into()))
+        );
+
+        state.handle_app_event(detected(
+            Agent::Codex,
+            &["codex", "-s", "danger-full-access"],
+        ));
+        assert_eq!(
+            recorded(&state),
+            Some(("codex".into(), "codex -s danger-full-access".into()))
+        );
+        assert!(state.session_dirty);
     }
 
     fn mark_linked_worktree(state: &mut AppState, ws_idx: usize) {

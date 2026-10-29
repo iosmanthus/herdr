@@ -137,6 +137,8 @@ pub struct TerminalState {
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
+    /// Command line of the agent process, for resume with its launch options.
+    pub agent_launch: Option<crate::agent_resume::AgentLaunch>,
     reported_resume: Option<crate::agent_resume::ReportedAgentResume>,
     reported_resume_revision: u64,
     pub terminal_title: Option<String>,
@@ -177,6 +179,7 @@ impl TerminalState {
             agent_metadata: HashMap::new(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             persisted_agent_session: None,
+            agent_launch: None,
             reported_resume: None,
             reported_resume_revision: 0,
             terminal_title: None,
@@ -1433,6 +1436,20 @@ impl TerminalState {
             == ("herdr:opencode", "opencode", Some("select"), None)
     }
 
+    /// Record the command line of a detected agent process. Returns whether
+    /// the record changed: a new agent, or the same agent with other options.
+    pub fn record_agent_launch(&mut self, agent: crate::detect::Agent, argv: Vec<String>) -> bool {
+        let launch = crate::agent_resume::AgentLaunch {
+            agent: crate::detect::agent_label(agent).to_owned(),
+            argv,
+        };
+        if self.agent_launch.as_ref() == Some(&launch) {
+            return false;
+        }
+        self.agent_launch = Some(launch);
+        true
+    }
+
     pub fn set_persisted_agent_session(
         &mut self,
         session: crate::agent_resume::PersistedAgentSession,
@@ -2339,6 +2356,7 @@ impl TerminalState {
         self.last_agent_state_change_seq = None;
         self.last_agent_completion_seq = None;
         self.launch_argv = None;
+        self.agent_launch = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit = None;
         self.agent_process_acquisition_pending = false;

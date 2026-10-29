@@ -111,6 +111,9 @@ pub struct PaneSnapshot {
     pub agent_resume: Option<PaneAgentResumeSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    /// Command line of the agent process; resume keeps its launch options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_launch: Option<crate::agent_resume::AgentLaunch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,6 +353,7 @@ fn capture_tab(
             })
             .unwrap_or_default();
         let launch_argv = terminal.and_then(|terminal| terminal.launch_argv.clone());
+        let agent_launch = terminal.and_then(|terminal| terminal.agent_launch.clone());
         let agent_session = terminal.and_then(|terminal| {
             if let Some(authority) = terminal.hook_authority.as_ref() {
                 if let Some(session_ref) = authority.session_ref.as_ref() {
@@ -388,6 +392,7 @@ fn capture_tab(
                 agent_session,
                 agent_resume,
                 launch_argv,
+                agent_launch,
             },
         );
     }
@@ -707,6 +712,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                agent_launch: None,
             },
         );
         panes.insert(
@@ -719,6 +725,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                agent_launch: None,
             },
         );
 
@@ -1306,6 +1313,31 @@ mod tests {
     }
 
     #[test]
+    fn pane_snapshot_agent_launch_round_trips_and_is_optional() {
+        let pane = PaneSnapshot {
+            cwd: PathBuf::from("/tmp"),
+            label: None,
+            agent_name: None,
+            managed_agent_kind: None,
+            agent_session: None,
+            agent_resume: None,
+            launch_argv: None,
+            agent_launch: Some(crate::agent_resume::AgentLaunch {
+                agent: "claude".into(),
+                argv: vec!["claude".into(), "--verbose".into()],
+            }),
+        };
+        let json = serde_json::to_string(&pane).unwrap();
+        let read: PaneSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(read.agent_launch, pane.agent_launch);
+
+        let old: PaneSnapshot = serde_json::from_str(r#"{"cwd":"/tmp"}"#).unwrap();
+        assert!(old.agent_launch.is_none());
+        let none = serde_json::to_string(&old).unwrap();
+        assert!(!none.contains("agent_launch"), "{none}");
+    }
+
+    #[test]
     fn capture_contract_includes_reported_agent_resume() {
         let mut state = state_with_workspaces(&["one"]);
         let root = state.workspaces[0].tabs[0].root_pane;
@@ -1405,6 +1437,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                agent_launch: None,
             },
         );
         panes.insert(
@@ -1419,6 +1452,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                agent_launch: None,
             },
         );
 

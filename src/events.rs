@@ -89,6 +89,13 @@ pub enum AppEvent {
         agent: Agent,
         observed_at: Instant,
     },
+    /// Process detection read the command line of a directly started agent,
+    /// so that a later restore can resume it with the same launch options.
+    AgentLaunchArgvDetected {
+        pane_id: PaneId,
+        agent: Agent,
+        argv: Vec<String>,
+    },
     /// The current Codex input screen is visible during managed startup.
     CodexPromptObserved { pane_id: PaneId, ready: bool },
     /// Fallback detector state changed in a pane.
