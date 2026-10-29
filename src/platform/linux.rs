@@ -12,6 +12,9 @@ pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
 use super::{ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess, Signal};
 
 mod clipboard;
+mod input_source;
+
+pub(crate) use input_source::{switch_to_ascii_input_source, InputSourceRestore};
 
 pub(crate) use super::unix_common::{
     configure_status_command, create_remote_private_dir, create_remote_ssh_config_dir,
