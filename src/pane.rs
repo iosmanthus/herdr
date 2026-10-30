@@ -2585,6 +2585,11 @@ impl PaneRuntime {
         let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
         let _ = pane_terminal.apply_host_terminal_appearance(host_terminal_appearance);
+        // The app caches titles and syncs a pane's title only when asked, so a
+        // transferred title must be requested like one the child just set.
+        if terminal_title.is_some() {
+            render_dirty.request_terminal_title(pane_id);
+        }
         pane_terminal.seed_terminal_title(terminal_title);
         if let Some(input_state) = input_state {
             pane_terminal.seed_handoff_input_state(input_state);

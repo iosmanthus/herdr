@@ -2117,6 +2117,80 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
+    async fn live_handoff_publishes_the_transferred_terminal_title() {
+        let (snapshot, _) = snapshot_with_saved_pane_history();
+        let (events, _events_rx) = mpsc::channel(32);
+        let (workspaces, terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            4096,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events.clone(),
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
+        let snapshot = crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0);
+        let pane_id = workspaces[0].tabs[0].panes.keys().next().copied().unwrap();
+        let runtime = runtimes.values().next().unwrap();
+        runtime
+            .pause_handoff_reader(std::time::Duration::from_secs(2))
+            .unwrap();
+        let mut state = runtime.handoff_runtime_state(pane_id.raw());
+        state.terminal_title = Some("✳ transferred title".into());
+        let mut imports = HashMap::from([(
+            pane_id.raw(),
+            crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd: runtime.duplicate_handoff_fd().unwrap(),
+                state,
+            },
+        )]);
+        let render_dirty = Arc::new(RenderSignal::new());
+        let (restored_workspaces, _, restored_runtimes) = restore_handoff(
+            &snapshot,
+            4096,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            &mut imports,
+            events,
+            Arc::new(Notify::new()),
+            render_dirty.clone(),
+        )
+        .unwrap();
+        let restored_runtimes = crate::terminal::TerminalRuntimeRegistry::from(restored_runtimes);
+        let restored_pane = restored_workspaces[0].tabs[0]
+            .panes
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+
+        assert_eq!(
+            restored_runtimes
+                .values()
+                .next()
+                .unwrap()
+                .terminal_title()
+                .as_deref(),
+            Some("✳ transferred title")
+        );
+        assert!(
+            render_dirty
+                .pending_terminal_title_sources()
+                .contains(&restored_pane),
+            "the app caches terminal titles and syncs them only on request; \
+             a transferred title must be requested like a changed one"
+        );
+        drop(restored_runtimes);
+        drop(runtimes);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
     async fn live_handoff_preserves_hook_status_until_next_report() {
         for state_before_handoff in [AgentState::Working, AgentState::Blocked] {
             let (snapshot, _) = snapshot_with_saved_pane_history();
